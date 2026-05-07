@@ -1,0 +1,1346 @@
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+
+/* ─────────────────────────────────────────────────────────────
+   GLOBAL CSS
+───────────────────────────────────────────────────────────── */
+const G = `
+  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=Nunito:ital,wght@0,400;0,600;0,700;0,800;1,400&family=Nunito+Sans:opsz,wght@6..12,400;6..12,500;6..12,600;6..12,700&display=swap');
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;background:#f5ebd9;font-family:'Nunito Sans',sans-serif;overscroll-behavior:none;}
+  ::-webkit-scrollbar{width:4px;height:4px;}
+  ::-webkit-scrollbar-thumb{background:#d9c9b0;border-radius:99px;}
+  @keyframes revealUp  {from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes slideUp   {from{transform:translateY(100%)}to{transform:translateY(0)}}
+  @keyframes popIn     {from{opacity:0;transform:scale(.94)}to{opacity:1;transform:scale(1)}}
+  @keyframes flyRight  {to{transform:translateX(130vw) rotate(28deg);opacity:0}}
+  @keyframes flyLeft   {to{transform:translateX(-130vw) rotate(-28deg);opacity:0}}
+  @keyframes spin      {to{transform:rotate(360deg)}}
+  @keyframes pulse     {0%,100%{opacity:1}50%{opacity:.4}}
+  .fly-right{animation:flyRight .4s cubic-bezier(.4,0,1,1) forwards!important;}
+  .fly-left {animation:flyLeft  .4s cubic-bezier(.4,0,1,1) forwards!important;}
+`;
+
+/* ─────────────────────────────────────────────────────────────
+   THEME
+───────────────────────────────────────────────────────────── */
+const C = {
+  // Notability-inspired palette
+  bg:"#f5ebd9",        // warm parchment — Notability's exact theme color
+  surface:"#fffdf8",   // off-white paper
+  surfaceAlt:"#fef6e8",// slightly warmer surface for cards
+  border:"#e8d9c0",    // warm sand border
+  text:"#2c2218",      // rich warm dark
+  muted:"#8a7560",     // warm medium tone
+  // Primary accent — Notability coral/terracotta
+  amber:"#e8623a",     amberBg:"#fdf0ea",  amberBdr:"#f5c4a8",
+  // Greens — soft sage
+  green:"#4a9068",     greenBg:"#e8f4ee",
+  // Reds — warm coral
+  red:"#d44a3a",       redBg:"#fdf0ee",
+  // Blues — muted periwinkle
+  blue:"#4a72c4",      blueBg:"#eef2fb",
+  // Violets — lavender
+  violet:"#8a5cc8",    violetBg:"#f2edfc",
+  // Pinks — dusty rose
+  pink:"#d45888",      pinkBg:"#fdeef5",
+  // Teal — muted
+  teal:"#3a9090",      tealBg:"#e6f4f4",
+  // Neutrals
+  gray:"#8a8a8a",      grayBg:"#f0ede8",
+  // Extra Notability pastels
+  peach:"#f0a070",     peachBg:"#fdf3ec",
+  sage:"#7aaa80",      sageBg:"#edf6ee",
+};
+const ARTICLE_META = {
+  der:{color:"#4a72c4",bg:"#eef2fb"},   // periwinkle blue
+  die:{color:"#d45888",bg:"#fdeef5"},   // dusty rose
+  das:{color:"#4a9068",bg:"#e8f4ee"},   // sage green
+};
+const CAT_PAL = [
+  "#e8623a","#4a9068","#4a72c4","#8a5cc8","#d45888","#3a9090",
+  "#e8904a","#5a82d4","#c45870","#6aaa78","#d4784a","#7870b8",
+];
+const catColor = (cat="")=>{if(!cat)return C.amber;let h=0;for(let i=0;i<cat.length;i++)h=(h*31+cat.charCodeAt(i))&0xffffffff;return CAT_PAL[Math.abs(h)%CAT_PAL.length];};
+
+/* ─────────────────────────────────────────────────────────────
+   STORAGE / UTILS
+───────────────────────────────────────────────────────────── */
+const LS={CARDS:"de5_cards",STATS:"de5_stats",STREAK:"de5_streak",APIKEY:"de5_api"};
+const lsGet=(k,fb)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):fb;}catch{return fb;}};
+const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}};
+const uid=()=>`c${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
+const TODAY=()=>new Date().toISOString().slice(0,10);
+
+function speak(text){
+  if(!window.speechSynthesis)return;
+  window.speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text);
+  u.lang="de-DE";u.rate=0.88;u.pitch=1;
+  const v=window.speechSynthesis.getVoices().find(v=>v.lang.startsWith("de"));
+  if(v)u.voice=v;
+  window.speechSynthesis.speak(u);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   CANONICAL CATEGORIES
+───────────────────────────────────────────────────────────── */
+const CANONICAL_CATS = [
+  "Reflexive Verbs","Verbs + Prepositions","Akkusativ","Dativ","Nominativ",
+  "Perfekt","Präteritum","Präsens","Articles: der / die / das",
+  "Vocabulary","Exam Sentences","Needs Review",
+];
+
+/* ─────────────────────────────────────────────────────────────
+   SEED DATA
+───────────────────────────────────────────────────────────── */
+const SEED = [
+  {id:"s1",category:"Reflexive Verbs",article:"",front:"sich freuen",back:"to be happy / to look forward",hebrewTranslation:"לשמוח / לצפות בשמחה",exampleGerman:"Ich freue mich sehr auf die Ferien.",exampleHebrew:"אני מאוד מצפה בשמחה לחופשה.",grammarNote:"auf + Akk = לצפות\nüber + Akk = לשמוח על משהו שקרה",preposition:"auf / über",grammarCase:"Akkusativ",prasens:"freue mich",perfekt:"habe mich gefreut",prateritum:"freute mich",tags:["reflexive","emotions"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s2",category:"Reflexive Verbs",article:"",front:"sich erinnern an",back:"to remember",hebrewTranslation:"להיזכר ב / לזכור",exampleGerman:"Ich erinnere mich gut an meinen ersten Schultag.",exampleHebrew:"אני זוכר היטב את היום הראשון שלי.",grammarNote:"an + Akkusativ — מה שנזכרים בו",preposition:"an",grammarCase:"Akkusativ",prasens:"erinnere mich",perfekt:"habe mich erinnert",prateritum:"erinnerte mich",tags:["reflexive","dativ"],difficulty:2,notes:"",createdAt:"2024-01-01"},
+  {id:"s3",category:"Reflexive Verbs",article:"",front:"sich vorbereiten auf",back:"to prepare for",hebrewTranslation:"להתכונן ל",exampleGerman:"Wir bereiten uns auf die Prüfung vor.",exampleHebrew:"אנחנו מתכוננים למבחן.",grammarNote:"auf + Akkusativ — trennbar!",preposition:"auf",grammarCase:"Akkusativ",prasens:"bereite vor",perfekt:"habe vorbereitet",prateritum:"bereitete vor",tags:["reflexive","exam"],difficulty:2,notes:"trennbar!",createdAt:"2024-01-01"},
+  {id:"s4",category:"Reflexive Verbs",article:"",front:"sich kümmern um",back:"to take care of",hebrewTranslation:"לדאוג ל / לטפל ב",exampleGerman:"Sie kümmert sich um ihre kleine Schwester.",exampleHebrew:"היא דואגת לאחותה הקטנה.",grammarNote:"um + Akkusativ",preposition:"um",grammarCase:"Akkusativ",prasens:"kümmere mich",perfekt:"habe mich gekümmert",prateritum:"kümmerte mich",tags:["reflexive","care"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s5",category:"Reflexive Verbs",article:"",front:"sich interessieren für",back:"to be interested in",hebrewTranslation:"להתעניין ב",exampleGerman:"Sie interessiert sich sehr für Musik.",exampleHebrew:"היא מתעניינת מאוד במוזיקה.",grammarNote:"für + Akkusativ",preposition:"für",grammarCase:"Akkusativ",prasens:"interessiere mich",perfekt:"habe mich interessiert",prateritum:"interessierte mich",tags:["reflexive","akkusativ"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s6",category:"Verbs + Prepositions",article:"",front:"warten auf",back:"to wait for",hebrewTranslation:"לחכות ל",exampleGerman:"Ich warte schon lange auf eine Antwort.",exampleHebrew:"אני כבר מחכה הרבה זמן לתשובה.",grammarNote:"auf + Akkusativ",preposition:"auf",grammarCase:"Akkusativ",prasens:"warte",perfekt:"habe gewartet",prateritum:"wartete",tags:["prepositions"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s7",category:"Verbs + Prepositions",article:"",front:"denken an",back:"to think about",hebrewTranslation:"לחשוב על",exampleGerman:"Ich denke oft an meine Heimat.",exampleHebrew:"אני חושב לעתים קרובות על מולדתי.",grammarNote:"an + Akkusativ",preposition:"an",grammarCase:"Akkusativ",prasens:"denke",perfekt:"habe gedacht",prateritum:"dachte",tags:["prepositions"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s8",category:"Perfekt",article:"",front:"Wie bildet man das Perfekt?",back:"haben/sein + Partizip II",hebrewTranslation:"איך יוצרים עבר מורכב?",exampleGerman:"Ich habe gegessen. / Ich bin gegangen.",exampleHebrew:"אכלתי. / הלכתי.",grammarNote:"haben + Partizip II (רוב הפעלים)\nsein + Partizip II (תנועה: gehen, kommen...)",preposition:"",grammarCase:"",prasens:"",perfekt:"habe gegessen / bin gegangen",prateritum:"",tags:["grammar","perfekt"],difficulty:2,notes:"",createdAt:"2024-01-01"},
+  {id:"s9",category:"Präteritum",article:"",front:"sein → Präteritum",back:"was / were",hebrewTranslation:"היה (עבר פשוט)",exampleGerman:"Das war wirklich wunderschön.",exampleHebrew:"זה היה ממש יפה.",grammarNote:"war/warst/war/waren/wart/waren",preposition:"",grammarCase:"",prasens:"bin/bist/ist",perfekt:"bin gewesen",prateritum:"war/warst/war/waren",tags:["grammar","praeteritum"],difficulty:2,notes:"",createdAt:"2024-01-01"},
+  {id:"s10",category:"Vocabulary",article:"die",front:"Prüfung",back:"exam / test",hebrewTranslation:"בחינה / מבחן",exampleGerman:"Ich lerne jeden Tag für die Prüfung.",exampleHebrew:"אני לומד כל יום למבחן.",grammarNote:"die Prüfung — Pl: die Prüfungen\nסיומת -ung תמיד נשי!",preposition:"für",grammarCase:"Akkusativ",prasens:"",perfekt:"",prateritum:"",tags:["vocab","education"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s11",category:"Vocabulary",article:"der",front:"Beruf",back:"profession",hebrewTranslation:"מקצוע",exampleGerman:"Welchen Beruf hast du gelernt?",exampleHebrew:"איזה מקצוע למדת?",grammarNote:"der Beruf — Pl: die Berufe",preposition:"",grammarCase:"",prasens:"",perfekt:"",prateritum:"",tags:["vocab","work"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s12",category:"Articles: der / die / das",article:"",front:"סיומת -ung",back:"Always feminine — die",hebrewTranslation:"תמיד נשי — die",exampleGerman:"die Wohnung, die Prüfung, die Meinung",exampleHebrew:"דירה, בחינה, דעה",grammarNote:"כלל: סיומת -ung תמיד die!",preposition:"",grammarCase:"",prasens:"",perfekt:"",prateritum:"",tags:["articles","rule"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s13",category:"Exam Sentences",article:"",front:"Meiner Meinung nach...",back:"In my opinion...",hebrewTranslation:"לדעתי...",exampleGerman:"Meiner Meinung nach ist das sehr wichtig.",exampleHebrew:"לדעתי, זה מאוד חשוב.",grammarNote:"ביטוי לחוות דעה — Genitiv",preposition:"",grammarCase:"Genitiv",prasens:"",perfekt:"",prateritum:"",tags:["exam","opinion"],difficulty:1,notes:"",createdAt:"2024-01-01"},
+  {id:"s14",category:"Akkusativ",article:"",front:"Nominativ vs. Akkusativ",back:"Subject vs. Direct Object",hebrewTranslation:"נושא מול מושא ישיר",exampleGerman:"Der Mann sieht den Hund.",exampleHebrew:"האיש רואה את הכלב.",grammarNote:"Nom: der/die/das\nAkk: den/die/das\nרק der → den!",preposition:"",grammarCase:"Akkusativ",prasens:"",perfekt:"",prateritum:"",tags:["cases","grammar"],difficulty:2,notes:"",createdAt:"2024-01-01"},
+  {id:"s15",category:"Dativ",article:"",front:"Wem gibst du das Buch?",back:"To whom do you give the book?",hebrewTranslation:"למי אתה נותן את הספר?",exampleGerman:"Ich gebe dem Mann das Buch.",exampleHebrew:"אני נותן לאיש את הספר.",grammarNote:"Dativ: dem/der/dem (Sg)\nden+n (Pl)\nשאלה: wem?",preposition:"",grammarCase:"Dativ",prasens:"gebe",perfekt:"habe gegeben",prateritum:"gab",tags:["cases","dativ"],difficulty:2,notes:"",createdAt:"2024-01-01"},
+];
+
+function initCards(){const s=lsGet(LS.CARDS,null);if(s&&s.length)return s;lsSet(LS.CARDS,SEED);return SEED;}
+
+/* ─────────────────────────────────────────────────────────────
+   SPACED REPETITION
+───────────────────────────────────────────────────────────── */
+function nextReviewDate(stat,knew){
+  if(!knew)return TODAY();
+  const n=stat?.knownCount||0;
+  const days=n<=1?1:n<=3?3:n<=6?7:14;
+  const d=new Date();d.setDate(d.getDate()+days);
+  return d.toISOString().slice(0,10);
+}
+function isDue(stat){if(!stat?.nextReview)return true;return stat.nextReview<=TODAY();}
+function buildDeck(cards,stats,statusFilter,catFilter){
+  let f=cards;
+  // Category filter (multi)
+  if(catFilter&&catFilter.length>0)f=f.filter(c=>catFilter.includes(c.category));
+  // Status filter
+  if(statusFilter==="unknown")      f=f.filter(c=>!stats[c.id]||stats[c.id].status==="unknown");
+  else if(statusFilter==="known")   f=f.filter(c=>stats[c.id]?.status==="known");
+  else if(statusFilter==="difficult")f=f.filter(c=>stats[c.id]?.status==="difficult");
+  else if(statusFilter==="new")     f=f.filter(c=>!stats[c.id]||!stats[c.id].reviewCount);
+  else if(statusFilter==="due")     f=f.filter(c=>isDue(stats[c.id]));
+  else if(statusFilter==="review")  f=f.filter(c=>c.category==="Needs Review");
+  return[...f].sort((a,b)=>{
+    const sa=stats[a.id],sb=stats[b.id];
+    const pa=!sa||sa.status==="unknown"?0:sa.status==="difficult"?1:2;
+    const pb=!sb||sb.status==="unknown"?0:sb.status==="difficult"?1:2;
+    if(pa!==pb)return pa-pb;
+    return(sa?.nextReview||"0").localeCompare(sb?.nextReview||"0");
+  });
+}
+
+/* ─────────────────────────────────────────────────────────────
+   SMART PARSER ENGINE
+───────────────────────────────────────────────────────────── */
+const CAT_SIGNALS = {
+  "Reflexive Verbs":         [/\bsich\b/i,/reflexiv/i],
+  "Verbs + Prepositions":    [/\+\s*(akk|dat)/i,/verb.{0,10}prep/i,/(warten|denken|sprechen|achten|hoffen).{0,10}(auf|an|über|für)/i],
+  "Akkusativ":               [/akkusativ/i,/\bakk\b/i,/den\b/i,/einen\b/i],
+  "Dativ":                   [/\bdativ\b/i,/\bdat\b/i,/\bwem\b/i,/\bdem\b/i,/\beinem\b/i],
+  "Nominativ":               [/nominativ/i,/\bnom\b/i,/\bwer\b/i],
+  "Perfekt":                 [/perfekt/i,/partizip\s*ii/i,/\bhabe\s+ge/i,/\bbin\s+ge/i,/\bhat\s+ge/i],
+  "Präteritum":              [/präteritum/i,/preterit/i,/\bwar\b/i,/\bhatte\b/i,/\bwurde\b/i],
+  "Präsens":                 [/präsens/i,/present\s+tense/i,/konjugation/i],
+  "Articles: der / die / das":[/\bartike[l]/i,/(der|die|das)\s+artikel/i,/gender\s+rule/i,/-(ung|heit|keit|schaft|tion|tät)\b/i],
+  "Vocabulary":              [/\b(der|die|das)\s+[A-ZÄÖÜ]/,/vocab/i,/wortschatz/i,/noun/i],
+  "Exam Sentences":          [/\bprüfung\b/i,/exam\s+sent/i,/meiner\s+meinung/i,/es\s+kommt\s+darauf/i],
+};
+
+function smartDetectCategory(text){
+  for(const[cat,pats]of Object.entries(CAT_SIGNALS)){
+    if(pats.some(p=>p.test(text)))return cat;
+  }
+  return "Needs Review";
+}
+function detectArticle(t){const m=t.match(/\b(der|die|das)\b/i);return m?m[1].toLowerCase():"";}
+function detectCase(t){const l=t.toLowerCase();if(/akkusativ|akk\b/.test(l))return"Akkusativ";if(/dativ|dat\b/.test(l))return"Dativ";if(/nominativ|nom\b/.test(l))return"Nominativ";if(/genitiv|gen\b/.test(l))return"Genitiv";return"";}
+function detectPrep(t){const ps=["auf","mit","bei","für","an","in","über","um","von","zu","aus","nach","gegen","durch","ohne"];const l=t.toLowerCase();return ps.filter(p=>new RegExp(`\\b${p}\\b`).test(l)).slice(0,3).join(" / ");}
+function extractTags(text,cat){const tags=[];const l=text.toLowerCase();if(/sich\b/.test(l))tags.push("reflexive");if(/exam|prüfung/.test(l))tags.push("exam");if(/vocab|wort/.test(l))tags.push("vocab");if(/grammatik|grammar|regel/.test(l))tags.push("grammar");if(cat)tags.push(cat.toLowerCase().replace(/[\s/+:]+/g,"").slice(0,10));return[...new Set(tags)].slice(0,4);}
+
+function parseBlock(block){
+  const lines=block.split("\n").map(l=>l.trim()).filter(Boolean);
+  if(!lines.length)return null;
+  const c={id:uid(),category:"",article:"",front:"",back:"",hebrewTranslation:"",exampleGerman:"",exampleHebrew:"",grammarNote:"",preposition:"",grammarCase:"",prasens:"",perfekt:"",prateritum:"",tags:[],difficulty:1,notes:"",createdAt:TODAY()};
+  const kv=(line)=>line.split(":").slice(1).join(":").trim();
+  for(const line of lines){
+    const low=line.toLowerCase();
+    if(/^(category|kategorie):/.test(low))        {c.category=kv(line);}
+    else if(/^(front|deutsch|de|word|wort):/.test(low)) {c.front=kv(line);}
+    else if(/^(back|english|en|translation):/.test(low)){c.back=kv(line);}
+    else if(/^(hebrew|עברית|he|übersetzung):/.test(low)){c.hebrewTranslation=kv(line);}
+    else if(/^(example|beispiel|example_de):/.test(low)){c.exampleGerman=kv(line);}
+    else if(/^(example_he|example_hebrew|דוגמה):/.test(low)){c.exampleHebrew=kv(line);}
+    else if(/^(grammar|grammatik|note|hinweis):/.test(low)){c.grammarNote=kv(line);}
+    else if(/^(prep|preposition|präposition):/.test(low)){c.preposition=kv(line);}
+    else if(/^(case|fall|kasus):/.test(low)){c.grammarCase=kv(line);}
+    else if(/^(präsens|present|pres):/.test(low)){c.prasens=kv(line);}
+    else if(/^(perfekt|perfect|perf):/.test(low)){c.perfekt=kv(line);}
+    else if(/^(präteritum|prateritum|past):/.test(low)){c.prateritum=kv(line);}
+    else if(/^(tags|schlagworte):/.test(low)){c.tags=kv(line).split(",").map(t=>t.trim()).filter(Boolean);}
+    else if(/^(difficulty|schwierigkeit):/.test(low)){c.difficulty=parseInt(kv(line))||1;}
+    else if(/^(article|artikel):/.test(low)){c.article=kv(line).toLowerCase();}
+    else if(/^(notes|notizen):/.test(low)){c.notes=kv(line);}
+    else if(!c.front&&line.length>1&&line.length<120){c.front=line;}
+    else if(c.front&&!c.hebrewTranslation&&/[\u0590-\u05FF]/.test(line)){c.hebrewTranslation=line;}
+    else if(c.front&&!c.back&&/[a-zA-Z]/.test(line)&&line!==c.front){c.back=line;}
+  }
+  if(!c.front)return null;
+  const ctx=`${c.front} ${c.back} ${c.grammarNote} ${c.notes}`;
+  if(!c.category)c.category=smartDetectCategory(ctx);
+  if(!c.article)c.article=detectArticle(c.front);
+  if(!c.grammarCase)c.grammarCase=detectCase(ctx);
+  if(!c.preposition)c.preposition=detectPrep(c.grammarNote||ctx);
+  if(!c.tags.length)c.tags=extractTags(ctx,c.category);
+  if(!c.back&&c.hebrewTranslation)c.back=c.hebrewTranslation;
+  return c;
+}
+
+function parsePipeLine(line){
+  const parts=line.split("|").map(p=>p.trim()).filter(Boolean);
+  if(!parts.length)return null;
+  const front=parts[0];if(!front)return null;
+  const backParts=parts.slice(1);
+  const back=backParts.join("\n");
+  const article=detectArticle(parts.join(" "));
+  const hebrewTranslation=backParts.find(p=>/[\u0590-\u05FF]/.test(p))||"";
+  const nonHebrew=backParts.filter(p=>!/[\u0590-\u05FF]/.test(p)).join(" / ");
+  const ctx=parts.join(" ");
+  return{id:uid(),createdAt:TODAY(),category:smartDetectCategory(ctx),article,front,back:back||front,hebrewTranslation,exampleGerman:"",exampleHebrew:"",grammarNote:nonHebrew&&nonHebrew!==front?nonHebrew:"",preposition:detectPrep(ctx),grammarCase:detectCase(ctx),prasens:"",perfekt:"",prateritum:"",tags:extractTags(ctx,""),difficulty:1,notes:""};
+}
+function parseText(text){
+  const lines=text.split("\n").map(l=>l.trim()).filter(Boolean);
+  if(lines.some(l=>l.includes("|"))){return lines.map(parsePipeLine).filter(Boolean);}
+  return text.split(/\n\s*\n|\n---+\n|\n={3,}\n/).map(b=>b.trim()).filter(b=>b.length>2).map(parseBlock).filter(Boolean);
+}
+function parseCSV(text){
+  const lines=text.trim().split("\n");if(lines.length<2)return[];
+  const hdr=lines[0].split(",").map(h=>h.trim().toLowerCase().replace(/"/g,""));
+  return lines.slice(1).map(line=>{
+    const cols=line.split(",").map(c=>c.trim().replace(/^"|"$/g,""));
+    const o={};hdr.forEach((h,i)=>o[h]=cols[i]||"");
+    const front=o.front||o.german||o.de||o.word||"";
+    if(!front)return null;
+    const c={id:uid(),createdAt:TODAY(),
+      category:o.category||smartDetectCategory(front),article:o.article||"",
+      front,back:o.back||o.english||o.en||"",hebrewTranslation:o.hebrew||o.he||o.hebrewtranslation||"",
+      exampleGerman:o.examplegerman||o.example||"",exampleHebrew:o.examplehebrew||"",
+      grammarNote:o.grammarnote||o.grammar||"",preposition:o.preposition||o.prep||"",
+      grammarCase:o.case||o.grammarcase||"",prasens:o.prasens||o.present||"",
+      perfekt:o.perfekt||o.perfect||"",prateritum:o.prateritum||o.past||"",
+      tags:(o.tags||"").split(";").map(t=>t.trim()).filter(Boolean),
+      difficulty:parseInt(o.difficulty)||1,notes:o.notes||""};
+    return c;
+  }).filter(Boolean);
+}
+function parseJSON(text){
+  try{
+    const arr=JSON.parse(text);
+    return(Array.isArray(arr)?arr:[arr]).map(r=>({
+      id:uid(),createdAt:TODAY(),
+      category:r.category||smartDetectCategory(r.front||""),article:r.article||"",
+      front:r.front||r.german||r.word||"",back:r.back||r.english||r.translation||"",
+      hebrewTranslation:r.hebrewTranslation||r.hebrew||"",exampleGerman:r.exampleGerman||r.example||"",
+      exampleHebrew:r.exampleHebrew||"",grammarNote:r.grammarNote||r.grammar||"",
+      preposition:r.preposition||"",grammarCase:r.grammarCase||r.case||"",
+      prasens:r.prasens||r.present||"",perfekt:r.perfekt||r.perfect||"",prateritum:r.prateritum||r.past||"",
+      tags:Array.isArray(r.tags)?r.tags:(r.tags||"").split(",").map(t=>t.trim()).filter(Boolean),
+      difficulty:parseInt(r.difficulty)||1,notes:r.notes||"",
+    })).filter(c=>c.front);
+  }catch{return[];}
+}
+
+/* ─────────────────────────────────────────────────────────────
+   AI INTEGRATION (Claude API)
+───────────────────────────────────────────────────────────── */
+async function aiGenerateCards(text,apiKey){
+  const res=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01"},
+    body:JSON.stringify({
+      model:"claude-sonnet-4-6",
+      max_tokens:4096,
+      system:`You are a German language flashcard generator for Hebrew-speaking learners. Extract every German vocabulary word, verb, grammar rule, or useful phrase from the input and generate rich flashcards. For each item return a JSON object with these fields:
+- category: one of: Reflexive Verbs, Verbs + Prepositions, Akkusativ, Dativ, Nominativ, Perfekt, Präteritum, Präsens, Articles: der / die / das, Vocabulary, Exam Sentences, Needs Review
+- article: "der", "die", "das", or ""
+- front: German word/phrase
+- back: English translation
+- hebrewTranslation: Hebrew translation
+- exampleGerman: example sentence in German
+- exampleHebrew: example sentence in Hebrew
+- grammarNote: grammar explanation (may be multi-line with \\n)
+- preposition: relevant preposition(s)
+- grammarCase: Akkusativ / Dativ / Nominativ / Genitiv or ""
+- prasens: Präsens conjugation
+- perfekt: Perfekt form
+- prateritum: Präteritum form
+- tags: array of strings
+- difficulty: 1, 2, or 3
+
+Return ONLY a valid JSON array. No markdown, no explanation.`,
+      messages:[{role:"user",content:`Extract flashcards from this German study material:\n\n${text}`}],
+    }),
+  });
+  if(!res.ok){const e=await res.json();throw new Error(e.error?.message||"API error");}
+  const data=await res.json();
+  const raw=data.content?.[0]?.text||"";
+  const clean=raw.replace(/```json|```/g,"").trim();
+  return JSON.parse(clean).map(r=>({...r,id:uid(),createdAt:TODAY()}));
+}
+
+/* ─────────────────────────────────────────────────────────────
+   OCR — uses Tesseract.js from CDN
+───────────────────────────────────────────────────────────── */
+async function ocrImage(file,onProgress){
+  return new Promise((resolve,reject)=>{
+    // Dynamically load Tesseract.js if not present
+    if(!window.Tesseract){
+      const s=document.createElement("script");
+      s.src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js";
+      s.onload=()=>doOCR(resolve,reject,file,onProgress);
+      s.onerror=()=>reject(new Error("Failed to load OCR library"));
+      document.head.appendChild(s);
+    }else{
+      doOCR(resolve,reject,file,onProgress);
+    }
+  });
+}
+function doOCR(resolve,reject,file,onProgress){
+  const reader=new FileReader();
+  reader.onload=async(e)=>{
+    try{
+      const result=await window.Tesseract.recognize(e.target.result,["deu","heb","eng"],{
+        logger:m=>{if(m.status==="recognizing text"&&onProgress)onProgress(Math.round(m.progress*100));}
+      });
+      resolve(result.data.text);
+    }catch(err){reject(err);}
+  };
+  reader.readAsDataURL(file);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   SMALL UI ATOMS
+───────────────────────────────────────────────────────────── */
+function Btn({children,onClick,variant="primary",size="md",disabled,style={},title}){
+  const sz={sm:{padding:"6px 12px",fontSize:12},md:{padding:"10px 18px",fontSize:13},lg:{padding:"13px 24px",fontSize:14}};
+  const vr={
+    primary:{background:C.amber,color:"#fff",boxShadow:`0 4px 14px ${C.amber}55`,border:"none"},
+    secondary:{background:C.surface,color:C.text,border:`1px solid ${C.border}`},
+    ghost:{background:"transparent",color:C.muted,border:"none"},
+    danger:{background:C.redBg,color:C.red,border:`1px solid ${C.red}33`},
+    green:{background:C.greenBg,color:C.green,border:`1px solid ${C.green}44`},
+    dark:{background:C.text,color:"#fff",border:"none"},
+  };
+  return(
+    <button onClick={disabled?undefined:onClick} title={title} style={{display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,borderRadius:99,fontFamily:"'Nunito Sans',sans-serif",fontWeight:600,cursor:disabled?"not-allowed":"pointer",transition:"all .15s",opacity:disabled?.5:1,userSelect:"none",...sz[size],...vr[variant],...style}}>
+      {children}
+    </button>
+  );
+}
+function Badge({children,color,bg}){return <span style={{display:"inline-block",padding:"3px 10px",borderRadius:99,fontSize:10,fontWeight:700,letterSpacing:.4,textTransform:"uppercase",background:bg||`${color||C.amber}18`,color:color||C.amber}}>{children}</span>;}
+function ArticleBadge({article,large}){
+  if(!article)return null;
+  const m=ARTICLE_META[article]||{};
+  return <span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",background:m.bg,color:m.color,border:`1.5px solid ${m.color}44`,borderRadius:99,fontSize:large?18:10,fontWeight:800,padding:large?"6px 18px":"3px 10px",letterSpacing:0,fontFamily:"'Playfair Display',serif"}}>{article}</span>;
+}
+function SpeakBtn({text,size=16}){
+  const[on,setOn]=useState(false);
+  if(!text)return null;
+  return <button onMouseDown={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();setOn(true);speak(text);setTimeout(()=>setOn(false),1600);}} title="Listen" style={{width:size+12,height:size+12,borderRadius:"50%",border:"none",background:on?C.amberBg:"transparent",fontSize:size,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"background .2s",flexShrink:0}}>{on?"🔊":"🔈"}</button>;
+}
+function Inp({value,onChange,placeholder,style={},dir,type="text",rows}){
+  const base={width:"100%",padding:"10px 13px",borderRadius:14,border:`1.5px solid ${C.border}`,fontSize:13,outline:"none",fontFamily:"'Nunito Sans',sans-serif",color:C.text,background:C.surfaceAlt,...style};
+  return rows?<textarea value={value} onChange={onChange} placeholder={placeholder} dir={dir} rows={rows} style={{...base,resize:"vertical"}}/>:<input type={type} value={value} onChange={onChange} placeholder={placeholder} dir={dir} style={base}/>;
+}
+function Sel({value,onChange,children,style={}}){return <select value={value} onChange={onChange} style={{width:"100%",padding:"10px 13px",borderRadius:14,border:`1.5px solid ${C.border}`,fontSize:13,outline:"none",fontFamily:"'Nunito Sans',sans-serif",color:C.text,background:C.surfaceAlt,cursor:"pointer",...style}}>{children}</select>;}
+function Modal({title,onClose,children,wide}){
+  useEffect(()=>{const h=e=>{if(e.key==="Escape")onClose();};window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);},[onClose]);
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(26,23,20,.5)",backdropFilter:"blur(4px)",display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:C.surface,borderRadius:"28px 28px 0 0",width:"100%",maxWidth:wide?640:440,maxHeight:"93dvh",display:"flex",flexDirection:"column",boxShadow:"0 -12px 48px rgba(0,0,0,.14)",animation:"slideUp .3s cubic-bezier(.22,1,.36,1)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"18px 22px 14px",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+          <h3 style={{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,letterSpacing:"-.3px",color:C.text}}>{title}</h3>
+          <button onClick={onClose} style={{width:32,height:32,border:`1px solid ${C.border}`,borderRadius:9,background:C.bg,cursor:"pointer",fontSize:17,color:C.muted,display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+        </div>
+        <div style={{overflowY:"auto",padding:"18px 22px 28px",flex:1}}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   CARD FORM
+───────────────────────────────────────────────────────────── */
+const EMPTY_CARD={category:"",article:"",front:"",back:"",hebrewTranslation:"",exampleGerman:"",exampleHebrew:"",grammarNote:"",preposition:"",grammarCase:"",prasens:"",perfekt:"",prateritum:"",tags:"",difficulty:1,notes:""};
+function CardForm({initial,allCats,onSave,onCancel}){
+  const[f,setF]=useState(()=>initial?{...initial,tags:Array.isArray(initial.tags)?initial.tags.join(", "):initial.tags||""}:EMPTY_CARD);
+  const[newCat,setNewCat]=useState("");const[showNew,setShowNew]=useState(false);
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  const lbl={fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.7,marginBottom:4,display:"block"};
+  const g2={display:"grid",gridTemplateColumns:"1fr 1fr",gap:10};
+  const canSave=f.front.trim()&&(showNew?newCat.trim():f.category);
+  const save=()=>{if(!canSave)return;const cat=showNew&&newCat.trim()?newCat.trim():f.category;const tags=typeof f.tags==="string"?f.tags.split(",").map(t=>t.trim()).filter(Boolean):f.tags||[];onSave({...f,category:cat,tags,id:f.id||uid(),createdAt:f.createdAt||TODAY()});};
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={g2}>
+        <div>
+          <label style={lbl}>Category *</label>
+          <Sel value={showNew?"__new__":f.category} onChange={e=>{if(e.target.value==="__new__"){setShowNew(true);}else{setShowNew(false);set("category",e.target.value);}}}>
+            <option value="">— Select —</option>
+            {CANONICAL_CATS.map(c=><option key={c} value={c}>{c}</option>)}
+            {allCats.filter(c=>!CANONICAL_CATS.includes(c)).map(c=><option key={c} value={c}>{c}</option>)}
+            <option value="__new__">+ New category…</option>
+          </Sel>
+          {showNew&&<Inp value={newCat} onChange={e=>setNewCat(e.target.value)} placeholder="New category name" style={{marginTop:6}}/>}
+        </div>
+        <div>
+          <label style={lbl}>Article</label>
+          <Sel value={f.article||""} onChange={e=>set("article",e.target.value)} style={{color:ARTICLE_META[f.article]?.color||C.text,fontWeight:f.article?700:400}}>
+            <option value="">—</option><option value="der">der 🔵</option><option value="die">die 🩷</option><option value="das">das 🟢</option>
+          </Sel>
+        </div>
+      </div>
+      <div style={g2}>
+        <div>
+          <label style={lbl}>German *</label>
+          <div style={{position:"relative"}}><Inp value={f.front} onChange={e=>set("front",e.target.value)} placeholder="sich freuen / das Haus" style={{paddingRight:36}}/>{f.front&&<div style={{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)"}}><SpeakBtn text={(f.article?" "+f.article+" ":"")+f.front} size={13}/></div>}</div>
+        </div>
+        <div><label style={lbl}>English / Back</label><Inp value={f.back} onChange={e=>set("back",e.target.value)} placeholder="to be happy"/></div>
+      </div>
+      <div><label style={lbl}>Hebrew Translation</label><Inp value={f.hebrewTranslation} onChange={e=>set("hebrewTranslation",e.target.value)} placeholder="לשמוח / לצפות" dir="rtl"/></div>
+      <div style={g2}>
+        <div><label style={lbl}>Präsens</label><Inp value={f.prasens} onChange={e=>set("prasens",e.target.value)} placeholder="freue mich"/></div>
+        <div><label style={lbl}>Perfekt</label><Inp value={f.perfekt} onChange={e=>set("perfekt",e.target.value)} placeholder="habe mich gefreut"/></div>
+      </div>
+      <div style={g2}>
+        <div><label style={lbl}>Präteritum</label><Inp value={f.prateritum} onChange={e=>set("prateritum",e.target.value)} placeholder="freute mich"/></div>
+        <div><label style={lbl}>Preposition + Case</label><Inp value={f.preposition} onChange={e=>set("preposition",e.target.value)} placeholder="auf + Akk"/></div>
+      </div>
+      <div>
+        <label style={lbl}>Example (German)</label>
+        <div style={{position:"relative"}}><Inp value={f.exampleGerman} onChange={e=>set("exampleGerman",e.target.value)} placeholder="Ich freue mich auf die Ferien." style={{paddingRight:36}}/>{f.exampleGerman&&<div style={{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)"}}><SpeakBtn text={f.exampleGerman} size={13}/></div>}</div>
+      </div>
+      <div><label style={lbl}>Example (Hebrew)</label><Inp value={f.exampleHebrew} onChange={e=>set("exampleHebrew",e.target.value)} placeholder="אני מצפה לחופשה." dir="rtl"/></div>
+      <div><label style={lbl}>Grammar Note</label><Inp value={f.grammarNote} onChange={e=>set("grammarNote",e.target.value)} placeholder="Notes on cases, usage..." rows={3}/></div>
+      <div style={g2}>
+        <div><label style={lbl}>Tags (comma-sep)</label><Inp value={typeof f.tags==="string"?f.tags:(f.tags||[]).join(", ")} onChange={e=>set("tags",e.target.value)} placeholder="reflexive, exam"/></div>
+        <div><label style={lbl}>Difficulty</label><Sel value={f.difficulty||1} onChange={e=>set("difficulty",parseInt(e.target.value))}><option value={1}>1 — Easy</option><option value={2}>2 — Medium</option><option value={3}>3 — Hard</option></Sel></div>
+      </div>
+      <div><label style={lbl}>Notes</label><Inp value={f.notes||""} onChange={e=>set("notes",e.target.value)} placeholder="My notes…"/></div>
+      <div style={{display:"flex",gap:10,marginTop:4}}>
+        <Btn variant="secondary" onClick={onCancel} style={{flex:1}}>Cancel</Btn>
+        <Btn onClick={save} disabled={!canSave} style={{flex:2}}>Save Card</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   SWIPE CARD
+───────────────────────────────────────────────────────────── */
+function SwipeCard({card,stat,onSwipe,stackIndex}){
+  const[revealed,setRevealed]=useState(false);
+  const[drag,setDrag]=useState({x:0,y:0,on:false});
+  const ref=useRef(null);
+  useEffect(()=>{setRevealed(false);setDrag({x:0,y:0,on:false});},[card.id]);
+  const pt=e=>e.touches?{x:e.touches[0].clientX,y:e.touches[0].clientY}:{x:e.clientX,y:e.clientY};
+  const onStart=e=>{ref.current=pt(e);setDrag({x:0,y:0,on:true});};
+  const onMove=e=>{if(!drag.on||!ref.current)return;const p=pt(e);setDrag(d=>({...d,x:p.x-ref.current.x,y:p.y-ref.current.y}));};
+  const onEnd=()=>{if(!drag.on)return;if(Math.abs(drag.x)>85)onSwipe(drag.x>0?"right":"left",card);else setDrag({x:0,y:0,on:false});ref.current=null;};
+  if(stackIndex>0){const sc=1-stackIndex*.038;return <div style={{position:"absolute",inset:0,borderRadius:28,zIndex:10-stackIndex,background:stackIndex===1?"#fdf8f0":"#f7edd8",border:`1px solid ${C.border}`,boxShadow:"0 2px 14px rgba(0,0,0,.06)",transform:`scale(${sc}) translateY(${stackIndex*13}px)`}}/>;}
+  const rot=drag.x*.09;const know=drag.x>45;const noKnow=drag.x<-45;
+  const kOp=Math.min(1,(drag.x-45)/55);const nOp=Math.min(1,(-drag.x-45)/55);
+  const cc=catColor(card.category);
+  return(
+    <div onMouseDown={onStart} onMouseMove={onMove} onMouseUp={onEnd} onMouseLeave={onEnd} onTouchStart={onStart} onTouchMove={onMove} onTouchEnd={onEnd}
+      style={{position:"absolute",inset:0,zIndex:20,background:C.surfaceAlt,borderRadius:28,border:`1.5px solid ${C.border}`,boxShadow:"0 8px 40px rgba(44,34,24,.12)",transform:`translateX(${drag.x}px) translateY(${drag.y*.22}px) rotate(${rot}deg)`,transition:drag.on?"none":"transform .32s cubic-bezier(.22,1,.36,1)",cursor:drag.on?"grabbing":"grab",userSelect:"none",WebkitUserSelect:"none",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      {know&&<div style={{position:"absolute",inset:0,zIndex:30,borderRadius:28,background:`${C.green}10`,border:`2.5px solid ${C.green}`,pointerEvents:"none",opacity:kOp,display:"flex",alignItems:"center",paddingLeft:22}}><span style={{background:C.green,color:"#fff",fontWeight:800,fontSize:15,padding:"7px 15px",borderRadius:10,transform:"rotate(-12deg)"}}>✓ ידעתי!</span></div>}
+      {noKnow&&<div style={{position:"absolute",inset:0,zIndex:30,borderRadius:28,background:`${C.red}08`,border:`2.5px solid ${C.red}`,pointerEvents:"none",opacity:nOp,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:22}}><span style={{background:C.red,color:"#fff",fontWeight:800,fontSize:15,padding:"7px 15px",borderRadius:10,transform:"rotate(12deg)"}}>✗ לא ידעתי</span></div>}
+      <div style={{height:6,flexShrink:0,background:cc,borderRadius:"28px 28px 0 0"}}/>
+      <div style={{flex:1,display:"flex",flexDirection:"column",padding:"16px 20px 18px",overflow:"hidden"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,gap:6}}>
+          <Badge color={cc}>{card.category}</Badge>
+          <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+            {card.article&&<ArticleBadge article={card.article}/>}
+            {(card.tags||[]).slice(0,2).map(t=><span key={t} style={{fontSize:9,background:C.border,color:C.muted,padding:"1px 6px",borderRadius:8,fontWeight:600}}>#{t}</span>)}
+            {stat?.status==="known"&&<span style={{fontSize:11,color:C.green,fontWeight:700}}>✓</span>}
+            {stat?.status==="difficult"&&<span style={{fontSize:11,color:C.amber,fontWeight:700}}>★</span>}
+            {card.category==="Needs Review"&&<span style={{fontSize:9,background:C.grayBg,color:C.gray,padding:"2px 7px",borderRadius:8,fontWeight:600}}>review</span>}
+          </div>
+        </div>
+        <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",textAlign:"center",padding:"4px 0"}}>
+          {card.article&&<div style={{marginBottom:8}}><ArticleBadge article={card.article} large/></div>}
+          <div style={{display:"flex",alignItems:"center",gap:8,justifyContent:"center"}}>
+            <p style={{fontFamily:"'Playfair Display',serif",fontSize:"clamp(22px,5.5vw,34px)",fontWeight:700,letterSpacing:"-.3px",color:C.text,lineHeight:1.25}}>{card.front}</p>
+            <SpeakBtn text={(card.article?" "+card.article+" ":"")+card.front} size={15}/>
+          </div>
+          {card.prasens&&<p style={{fontSize:11,color:C.muted,marginTop:6,fontStyle:"italic"}}>{card.prasens}</p>}
+          {!revealed&&<button onMouseDown={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()} onClick={()=>setRevealed(true)} style={{marginTop:20,padding:"11px 26px",background:C.amber,color:"#fff",border:"none",borderRadius:50,fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"'Nunito Sans',sans-serif",boxShadow:`0 4px 16px ${C.amber}55`}}>הצג תשובה ↓</button>}
+        </div>
+        {revealed&&(
+          <div style={{borderTop:`1px solid ${C.border}`,paddingTop:13,marginTop:4,animation:"revealUp .25s ease"}}>
+            <div style={{textAlign:"center",marginBottom:10}} dir="rtl">
+              <p style={{fontFamily:"'Playfair Display',serif",fontSize:"clamp(15px,3.8vw,21px)",fontWeight:700,color:C.amber,lineHeight:1.3}}>{card.hebrewTranslation||card.back}</p>
+              {card.hebrewTranslation&&card.back&&card.back!==card.hebrewTranslation&&<p style={{fontSize:12,color:C.muted,marginTop:2}}>{card.back}</p>}
+            </div>
+            {card.exampleGerman&&(
+              <div style={{background:C.bg,borderRadius:12,padding:"9px 12px",marginBottom:7}}>
+                <p style={{fontSize:9,fontWeight:700,color:C.muted,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Beispiel</p>
+                <div style={{display:"flex",alignItems:"flex-start",gap:5}}>
+                  <p style={{fontSize:12,color:C.text,fontWeight:500,flex:1,marginBottom:3}}>{card.exampleGerman}</p>
+                  <SpeakBtn text={card.exampleGerman} size={12}/>
+                </div>
+                {card.exampleHebrew&&<p style={{fontSize:11,color:C.muted}} dir="rtl">{card.exampleHebrew}</p>}
+              </div>
+            )}
+            {card.grammarNote&&(
+              <div style={{background:"#fef5ec",border:`1px solid ${C.amberBdr}`,borderRadius:16,padding:"8px 12px",marginBottom:card.preposition?7:0}}>
+                <p style={{fontSize:9,fontWeight:700,color:C.amber,letterSpacing:1,textTransform:"uppercase",marginBottom:3}}>📌 Grammar</p>
+                <p style={{fontSize:11,color:"#44403c",whiteSpace:"pre-line",lineHeight:1.6}}>{card.grammarNote}</p>
+              </div>
+            )}
+            {card.preposition&&<div style={{background:C.blueBg,border:`1px solid ${C.blue}33`,borderRadius:14,padding:"6px 12px"}}><span style={{fontSize:9,fontWeight:700,color:C.blue,textTransform:"uppercase",letterSpacing:.8}}>Prep: </span><span style={{fontSize:11,color:"#0c4a6e"}}>{card.preposition}{card.grammarCase?" · "+card.grammarCase:""}</span></div>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   STUDY VIEW — with multi-category filter
+───────────────────────────────────────────────────────────── */
+const STATUS_FILTERS=[
+  {key:"all",label:"All"},{key:"due",label:"Due"},{key:"new",label:"New"},
+  {key:"unknown",label:"Unknown"},{key:"known",label:"Known"},
+  {key:"difficult",label:"Difficult ★"},{key:"review",label:"Needs Review"},
+];
+
+function StudyView({cards,stats,onSwipe}){
+  const[status,setStatus]=useState("all");
+  const[selCats,setSelCats]=useState([]);// [] = all
+  const[showCatPanel,setShowCatPanel]=useState(false);
+  const[seed,setSeed]=useState(0);
+  const[idx,setIdx]=useState(0);
+  const[fly,setFly]=useState(null);
+
+  const allCats=useMemo(()=>Array.from(new Set(cards.map(c=>c.category))).sort(),[cards]);
+  const deck=useMemo(()=>buildDeck(cards,stats,status,selCats.length?selCats:null),[cards,stats,status,selCats,seed]);
+  useEffect(()=>setIdx(0),[status,selCats,seed]);
+
+  const card=deck[idx],n1=deck[idx+1],n2=deck[idx+2];
+
+  const doSwipe=(dir,c)=>{setFly(dir==="right"?"fly-right":"fly-left");setTimeout(()=>{onSwipe(dir,c);setIdx(i=>i+1);setFly(null);},370);};
+  const skip=()=>setIdx(i=>Math.min(i+1,deck.length));
+
+  const cnt=k=>{
+    const f=selCats.length?cards.filter(c=>selCats.includes(c.category)):cards;
+    if(k==="all")return f.length;
+    if(k==="due")return f.filter(c=>isDue(stats[c.id])).length;
+    if(k==="unknown")return f.filter(c=>!stats[c.id]||stats[c.id].status==="unknown").length;
+    if(k==="known")return f.filter(c=>stats[c.id]?.status==="known").length;
+    if(k==="difficult")return f.filter(c=>stats[c.id]?.status==="difficult").length;
+    if(k==="new")return f.filter(c=>!stats[c.id]||!stats[c.id].reviewCount).length;
+    if(k==="review")return f.filter(c=>c.category==="Needs Review").length;
+    return 0;
+  };
+
+  return(
+    <div style={{display:"flex",flexDirection:"column",flex:1,overflow:"hidden"}}>
+
+
+      {/* Category filter bar */}
+      <div style={{background:C.surfaceAlt,borderBottom:`1px solid ${C.border}`,padding:"8px 12px",display:"flex",gap:6,alignItems:"center",flexShrink:0,overflowX:"auto"}}>
+        <button onClick={()=>setShowCatPanel(v=>!v)} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 11px",borderRadius:18,border:`1.5px solid ${selCats.length?C.amber:C.border}`,background:selCats.length?C.amberBg:C.surface,color:selCats.length?C.amber:C.muted,fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>
+          🗂 {selCats.length?`${selCats.length} cat.`:"All Categories"} ▾
+        </button>
+        {selCats.map(cat=>(
+          <span key={cat} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:18,background:catColor(cat)+"18",border:`1px solid ${catColor(cat)}44`,color:catColor(cat),fontSize:10,fontWeight:700,whiteSpace:"nowrap",flexShrink:0}}>
+            {cat.length>16?cat.slice(0,15)+"…":cat}
+            <button onClick={()=>setSelCats(s=>s.filter(c=>c!==cat))} style={{background:"none",border:"none",cursor:"pointer",color:"inherit",fontSize:12,lineHeight:1,padding:0}}>×</button>
+          </span>
+        ))}
+        {selCats.length>0&&<button onClick={()=>setSelCats([])} style={{fontSize:10,color:C.muted,background:"none",border:"none",cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>clear</button>}
+      </div>
+
+      {/* Category panel overlay */}
+      {showCatPanel&&(
+        <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,zIndex:50,background:"rgba(26,23,20,.4)",backdropFilter:"blur(2px)"}} onClick={()=>setShowCatPanel(false)}>
+          <div onClick={e=>e.stopPropagation()} style={{position:"absolute",top:0,left:0,right:0,background:C.surface,borderRadius:"0 0 28px 28px",padding:"16px 16px 20px",boxShadow:"0 8px 32px rgba(0,0,0,.15)",maxHeight:"65dvh",overflowY:"auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <p style={{fontFamily:"'Nunito',sans-serif",fontSize:16,fontWeight:500,color:C.text}}>Filter by Category</p>
+              <div style={{display:"flex",gap:8}}>
+                <Btn size="sm" variant="ghost" onClick={()=>setSelCats([])}>Clear all</Btn>
+                <Btn size="sm" variant="dark" onClick={()=>setShowCatPanel(false)}>Done</Btn>
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {allCats.map(cat=>{
+                const on=selCats.includes(cat);const cc=catColor(cat);
+                const catCount=cards.filter(c=>c.category===cat).length;
+                return(
+                  <button key={cat} onClick={()=>setSelCats(s=>on?s.filter(c=>c!==cat):[...s,cat])} style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px",borderRadius:16,border:`1.5px solid ${on?cc:C.border}`,background:on?cc+"12":C.surface,cursor:"pointer",textAlign:"left",transition:"all .14s"}}>
+                    <div style={{width:10,height:10,borderRadius:"50%",background:cc,flexShrink:0}}/>
+                    <span style={{flex:1,fontSize:13,fontWeight:600,color:C.text}}>{cat}</span>
+                    <span style={{fontSize:11,color:C.muted}}>{catCount}</span>
+                    {on&&<span style={{color:cc,fontSize:14}}>✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Status filters */}
+      <div style={{background:C.surfaceAlt,borderBottom:`1px solid ${C.border}`,padding:"8px 12px",display:"flex",gap:5,overflowX:"auto",flexShrink:0}}>
+        {STATUS_FILTERS.map(f=>{const active=status===f.key;const n=cnt(f.key);return(
+          <button key={f.key} onClick={()=>setStatus(f.key)} style={{whiteSpace:"nowrap",padding:"6px 13px",borderRadius:99,fontSize:11,fontWeight:600,cursor:"pointer",border:active?"none":`1px solid ${C.border}`,background:active?C.text:C.surface,color:active?"#fff":C.muted,transition:"all .14s",fontFamily:"'Nunito Sans',sans-serif"}}>
+            {f.label} <span style={{opacity:.6}}>{n}</span>
+          </button>
+        );})}
+      </div>
+
+      {/* Card area */}
+      <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"12px 16px 4px",overflow:"hidden"}}>
+        <div style={{width:"100%",maxWidth:420,marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
+          <div style={{flex:1,height:4,background:C.border,borderRadius:99,overflow:"hidden"}}>
+            <div style={{height:4,background:C.amber,borderRadius:99,width:deck.length?`${(idx/deck.length)*100}%`:"0%",transition:"width .4s"}}/>
+          </div>
+          <span style={{fontSize:10,color:C.muted,whiteSpace:"nowrap"}}>{idx}/{deck.length}</span>
+        </div>
+        <div style={{position:"relative",width:"100%",maxWidth:420,height:"min(470px,calc(100dvh - 320px))"}}>
+          {deck.length===0?(
+            <div style={{position:"absolute",inset:0,background:C.surface,borderRadius:22,border:`1px solid ${C.border}`,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,padding:28,textAlign:"center",animation:"popIn .3s ease"}}>
+              <span style={{fontSize:40}}>🔍</span>
+              <p style={{fontFamily:"'Playfair Display',serif",fontSize:20,fontWeight:700,color:C.text}}>No cards found</p>
+              <p style={{fontSize:12,color:C.muted}}>Try a different filter or category</p>
+              <Btn size="sm" onClick={()=>{setStatus("all");setSelCats([]);}}>Reset Filters</Btn>
+            </div>
+          ):idx>=deck.length?(
+            <div style={{position:"absolute",inset:0,background:C.surface,borderRadius:22,border:`1px solid ${C.border}`,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,padding:28,textAlign:"center",animation:"popIn .3s ease"}}>
+              <span style={{fontSize:44}}>🏁</span>
+              <p style={{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:900,letterSpacing:"-.4px",color:C.text}}>Round complete!</p>
+              <p style={{fontSize:13,color:C.muted}}>Reviewed {deck.length} cards.</p>
+              <Btn onClick={()=>setSeed(s=>s+1)} style={{marginTop:4}}>Study Again</Btn>
+            </div>
+          ):(
+            <>
+              {n2&&<SwipeCard card={n2} stat={stats[n2.id]} onSwipe={()=>{}} stackIndex={2}/>}
+              {n1&&<SwipeCard card={n1} stat={stats[n1.id]} onSwipe={()=>{}} stackIndex={1}/>}
+              <div className={fly||""} style={{position:"absolute",inset:0,zIndex:20}}>
+                <SwipeCard key={card.id} card={card} stat={stats[card.id]} onSwipe={doSwipe} stackIndex={0}/>
+              </div>
+            </>
+          )}
+        </div>
+        {idx<deck.length&&deck.length>0&&<div style={{display:"flex",alignItems:"center",gap:5,marginTop:6,opacity:.38}}><span style={{fontSize:10,color:C.muted}}>← לא ידעתי</span><span style={{fontSize:10,color:C.border}}>swipe</span><span style={{fontSize:10,color:C.muted}}>ידעתי →</span></div>}
+      </div>
+
+      {/* Action buttons */}
+      {idx<deck.length&&deck.length>0&&(
+        <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:14,padding:"8px 16px 16px",flexShrink:0}}>
+          <button onClick={()=>doSwipe("left",card)} style={{width:58,height:58,borderRadius:"50%",background:C.surface,border:`2px solid ${C.red}55`,fontSize:22,cursor:"pointer",boxShadow:`0 4px 16px ${C.red}22`,display:"flex",alignItems:"center",justifyContent:"center",transition:"transform .14s,background .14s"}} onMouseEnter={e=>{e.currentTarget.style.background=C.redBg;e.currentTarget.style.transform="scale(1.08)";}} onMouseLeave={e=>{e.currentTarget.style.background=C.surface;e.currentTarget.style.transform="scale(1)";}}>✗</button>
+          {card&&<SpeakBtn text={(card.article?" "+card.article+" ":"")+card.front} size={18}/>}
+          <button onClick={skip} style={{width:36,height:36,borderRadius:"50%",background:C.bg,border:`1px solid ${C.border}`,fontSize:14,cursor:"pointer",color:C.muted,transition:"transform .14s"}} onMouseEnter={e=>e.currentTarget.style.transform="scale(1.08)"} onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}>→</button>
+          <button onClick={()=>doSwipe("right",card)} style={{width:58,height:58,borderRadius:"50%",background:C.surface,border:`2px solid ${C.green}55`,fontSize:22,cursor:"pointer",boxShadow:`0 4px 16px ${C.green}22`,display:"flex",alignItems:"center",justifyContent:"center",transition:"transform .14s,background .14s"}} onMouseEnter={e=>{e.currentTarget.style.background=C.greenBg;e.currentTarget.style.transform="scale(1.08)";}} onMouseLeave={e=>{e.currentTarget.style.background=C.surface;e.currentTarget.style.transform="scale(1)";}}>✓</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   LIBRARY VIEW
+───────────────────────────────────────────────────────────── */
+function LibraryView({cards,stats,onAdd,onUpdate,onDelete,onDuplicate,onDeleteCategory,onDeleteSubcategory}){
+  const[search,setSearch]=useState("");
+  const[catF,setCatF]=useState("All");
+  const[artF,setArtF]=useState("");
+  const[tagF,setTagF]=useState("");
+  const[editing,setEditing]=useState(null);
+  const[confirmDel,setConfirmDel]=useState(null);
+  const[sel,setSel]=useState(new Set());
+  const[manageCats,setManageCats]=useState(false);
+  const[confirmDelCat,setConfirmDelCat]=useState(null);
+  const cats=useMemo(()=>["All",...Array.from(new Set(cards.map(c=>c.category))).sort()],[cards]);
+  const tags=useMemo(()=>Array.from(new Set(cards.flatMap(c=>c.tags||[]))).sort(),[cards]);
+  const formCats=cats.filter(c=>c!=="All");
+  const filtered=useMemo(()=>cards.filter(c=>{const q=search.toLowerCase();const mQ=!q||c.front.toLowerCase().includes(q)||c.hebrewTranslation?.toLowerCase().includes(q)||(c.grammarNote||"").toLowerCase().includes(q)||(c.back||"").toLowerCase().includes(q);const mC=catF==="All"||c.category===catF;const mA=!artF||c.article===artF;const mT=!tagF||(c.tags||[]).includes(tagF);return mQ&&mC&&mA&&mT;}),[cards,search,catF,artF,tagF]);
+  const editCard=editing&&editing!=="new"?cards.find(c=>c.id===editing):null;
+  const togSel=id=>setSel(s=>{const n=new Set(s);n.has(id)?n.delete(id):n.add(id);return n;});
+  const delSel=()=>{sel.forEach(id=>onDelete(id));setSel(new Set());};
+  const inp={padding:"8px 11px",borderRadius:14,border:`1.5px solid ${C.border}`,fontSize:12,fontFamily:"'Nunito Sans',sans-serif",outline:"none",background:C.surfaceAlt,color:C.text};
+
+  const catMap=useMemo(()=>{
+    const result={};
+    Array.from(new Set(cards.map(c=>c.category))).sort().forEach(cat=>{
+      const inCat=cards.filter(c=>c.category===cat);
+      const subs=Array.from(new Set(inCat.filter(c=>c.subCategory).map(c=>c.subCategory))).sort();
+      result[cat]={count:inCat.length,subs};
+    });
+    return result;
+  },[cards]);
+
+  if(editing) return <Modal title={editing==="new"?"Add New Card":"Edit Card"} onClose={()=>setEditing(null)} wide><CardForm initial={editCard?{...editCard,tags:(editCard.tags||[]).join(", ")}:undefined} allCats={formCats} onSave={data=>{editing==="new"?onAdd(data):onUpdate({...editCard,...data});setEditing(null);}} onCancel={()=>setEditing(null)}/></Modal>;
+  if(confirmDel) return <Modal title="Delete Card?" onClose={()=>setConfirmDel(null)}><p style={{fontSize:14,color:C.muted,marginBottom:16}}>Delete "<b style={{color:C.text}}>{confirmDel.front}</b>"?</p><div style={{display:"flex",gap:10}}><Btn variant="secondary" onClick={()=>setConfirmDel(null)} style={{flex:1}}>Cancel</Btn><Btn variant="danger" onClick={()=>{onDelete(confirmDel.id);setConfirmDel(null);}} style={{flex:1}}>Delete</Btn></div></Modal>;
+
+  if(confirmDelCat) return(
+    <Modal title={confirmDelCat.type==="category"?"Delete Category?":"Delete Subcategory?"} onClose={()=>setConfirmDelCat(null)}>
+      {confirmDelCat.type==="category"
+        ?<p style={{fontSize:14,color:C.muted,marginBottom:16}}>Delete category <b style={{color:C.text}}>"{confirmDelCat.name}"</b>? <span style={{color:C.red}}>All {catMap[confirmDelCat.name]?.count||0} cards inside will be permanently deleted.</span></p>
+        :<p style={{fontSize:14,color:C.muted,marginBottom:16}}>Remove subcategory <b style={{color:C.text}}>"{confirmDelCat.name}"</b> from <b style={{color:C.text}}>"{confirmDelCat.parentCat}"</b>? Cards will remain but the subcategory label will be removed.</p>}
+      <div style={{display:"flex",gap:10}}>
+        <Btn variant="secondary" onClick={()=>setConfirmDelCat(null)} style={{flex:1}}>Cancel</Btn>
+        <Btn variant="danger" onClick={()=>{if(confirmDelCat.type==="category"){onDeleteCategory(confirmDelCat.name);if(catF===confirmDelCat.name)setCatF("All");}else onDeleteSubcategory(confirmDelCat.name,confirmDelCat.parentCat);setConfirmDelCat(null);}} style={{flex:1}}>Delete</Btn>
+      </div>
+    </Modal>
+  );
+
+  if(manageCats) return(
+    <div style={{display:"flex",flexDirection:"column",flex:1,overflow:"hidden"}}>
+      <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,padding:"11px 14px",display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+        <button onClick={()=>setManageCats(false)} style={{width:32,height:32,border:`1px solid ${C.border}`,borderRadius:9,background:C.bg,cursor:"pointer",fontSize:15,color:C.muted,display:"flex",alignItems:"center",justifyContent:"center"}}>←</button>
+        <h3 style={{fontFamily:"'Playfair Display',serif",fontSize:18,fontWeight:700,letterSpacing:"-.3px",color:C.text}}>Manage Categories</h3>
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:"12px 14px",display:"flex",flexDirection:"column",gap:8}}>
+        {Object.keys(catMap).length===0&&<p style={{color:C.muted,fontSize:13,textAlign:"center",padding:"32px 0"}}>No categories yet.</p>}
+        {Object.entries(catMap).map(([cat,{count,subs}])=>{
+          const cc=catColor(cat);
+          return(
+            <div key={cat} style={{background:C.surfaceAlt,borderRadius:20,border:`1.5px solid ${C.border}`,overflow:"hidden"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,padding:"11px 13px"}}>
+                <div style={{width:4,height:36,borderRadius:4,background:cc,flexShrink:0}}/>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:700,color:C.text}}>{cat}</p>
+                  <p style={{fontSize:11,color:C.muted}}>{count} card{count!==1?"s":""}{subs.length?` · ${subs.length} subcategor${subs.length===1?"y":"ies"}`:""}</p>
+                </div>
+                <button onClick={()=>setConfirmDelCat({type:"category",name:cat})} style={{padding:"5px 11px",border:`1px solid ${C.red}44`,borderRadius:8,background:C.redBg,color:C.red,fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>🗑 Delete all</button>
+              </div>
+              {subs.map(sub=>(
+                <div key={sub} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 13px 8px 32px",borderTop:`1px solid ${C.border}`,background:C.bg}}>
+                  <span style={{fontSize:11,color:C.muted,flex:1}}>› {sub}</span>
+                  <span style={{fontSize:11,color:C.muted,marginRight:8}}>{cards.filter(c=>c.category===cat&&c.subCategory===sub).length} cards</span>
+                  <button onClick={()=>setConfirmDelCat({type:"subcategory",name:sub,parentCat:cat})} style={{padding:"4px 10px",border:`1px solid ${C.border}`,borderRadius:7,background:C.surface,color:C.muted,fontSize:11,fontWeight:600,cursor:"pointer"}}>Remove</button>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+  return(
+    <div style={{display:"flex",flexDirection:"column",flex:1,overflow:"hidden"}}>
+      <div style={{background:C.surfaceAlt,borderBottom:`1px solid ${C.border}`,padding:"10px 14px",display:"flex",gap:6,flexWrap:"wrap",flexShrink:0}}>
+        <div style={{position:"relative",flex:"1 1 130px",minWidth:110}}><span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:12,pointerEvents:"none"}}>🔍</span><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{...inp,width:"100%",paddingLeft:28}}/></div>
+        <select value={catF} onChange={e=>setCatF(e.target.value)} style={{...inp,flex:"0 1 auto"}}>{cats.map(c=><option key={c}>{c}</option>)}</select>
+        <select value={artF} onChange={e=>setArtF(e.target.value)} style={{...inp,flex:"0 1 auto",color:ARTICLE_META[artF]?.color||C.text,fontWeight:artF?700:400}}><option value="">All articles</option><option value="der">der 🔵</option><option value="die">die 🩷</option><option value="das">das 🟢</option></select>
+        <select value={tagF} onChange={e=>setTagF(e.target.value)} style={{...inp,flex:"0 1 auto"}}><option value="">All tags</option>{tags.map(t=><option key={t} value={t}>#{t}</option>)}</select>
+        <Btn onClick={()=>setEditing("new")} size="sm">+ Add</Btn>
+        <Btn onClick={()=>setManageCats(true)} variant="secondary" size="sm">🗂 Manage</Btn>
+      </div>
+      {sel.size>0&&<div style={{background:C.text,padding:"7px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}><span style={{color:"#fff",fontSize:13,fontWeight:600}}>{sel.size} selected</span><div style={{display:"flex",gap:7}}><Btn variant="ghost" size="sm" onClick={()=>setSel(new Set())} style={{color:"#d0cac3",border:"1px solid #44403c"}}>Clear</Btn><Btn variant="danger" size="sm" onClick={delSel}>Delete {sel.size}</Btn></div></div>}
+      <div style={{flex:1,overflowY:"auto",padding:"9px 14px",display:"flex",flexDirection:"column",gap:6}}>
+        {filtered.length===0?<div style={{textAlign:"center",padding:"40px 0",color:C.muted}}><div style={{fontSize:34,marginBottom:8}}>🃏</div><p style={{fontSize:15,fontWeight:600,fontFamily:"'Nunito',sans-serif"}}>No cards found</p></div>:filtered.map(c=>{const cc=catColor(c.category);const s=stats[c.id];return(
+          <div key={c.id} style={{background:C.surfaceAlt,borderRadius:18,border:sel.has(c.id)?`2.5px solid ${C.amber}`:`1.5px solid ${C.border}`,padding:"11px 13px",display:"flex",alignItems:"center",gap:9,boxShadow:"0 1px 4px rgba(0,0,0,.04)",transition:"border .14s"}}>
+            <input type="checkbox" checked={sel.has(c.id)} onChange={()=>togSel(c.id)} style={{width:14,height:14,cursor:"pointer",flexShrink:0}}/>
+            <div style={{width:3.5,height:36,borderRadius:4,background:cc,flexShrink:0}}/>
+            {c.article&&<ArticleBadge article={c.article}/>}
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2,flexWrap:"wrap"}}>
+                <span style={{fontFamily:"'Playfair Display',serif",fontSize:14,fontWeight:700,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.front}</span>
+                <Badge color={cc}>{c.category}</Badge>
+                {s?.status==="known"&&<span style={{fontSize:10,color:C.green}}>✓</span>}
+                {s?.status==="difficult"&&<span style={{fontSize:10,color:C.amber}}>★</span>}
+              </div>
+              <p style={{fontSize:11,color:C.muted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} dir="rtl">{c.hebrewTranslation}</p>
+              {(c.tags||[]).length>0&&<div style={{display:"flex",gap:3,marginTop:2,flexWrap:"wrap"}}>{c.tags.map(t=><span key={t} style={{fontSize:9,background:C.border,color:C.muted,padding:"1px 5px",borderRadius:7,fontWeight:600}}>#{t}</span>)}</div>}
+            </div>
+            <div style={{display:"flex",gap:4,flexShrink:0,alignItems:"center"}}>
+              <SpeakBtn text={(c.article?" "+c.article+" ":"")+c.front} size={12}/>
+              <button title="Edit" onClick={()=>setEditing(c.id)} style={{width:28,height:28,border:`1px solid ${C.border}`,borderRadius:7,background:C.bg,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>✏️</button>
+              <button title="Duplicate" onClick={()=>onDuplicate(c)} style={{width:28,height:28,border:`1px solid ${C.border}`,borderRadius:7,background:C.bg,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>⧉</button>
+              <button title="Delete" onClick={()=>setConfirmDel(c)} style={{width:28,height:28,border:`1px solid ${C.red}44`,borderRadius:7,background:C.redBg,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>🗑</button>
+            </div>
+          </div>
+        );})}
+      </div>
+      <div style={{background:C.surfaceAlt,borderTop:`1px solid ${C.border}`,padding:"8px 14px",textAlign:"center",flexShrink:0}}>
+        <span style={{fontSize:11,color:C.muted}}>Showing {filtered.length} of {cards.length} cards · auto-saved</span>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   PREVIEW TABLE (shared by import steps)
+───────────────────────────────────────────────────────────── */
+function PreviewTable({cards:prev,existingFronts,allCats,onSaveAll,onUpdateCard,onClose}){
+  const[editIdx,setEditIdx]=useState(null);
+  const[skipped,setSkipped]=useState(new Set());
+  const toSave=prev.filter((_,i)=>!skipped.has(i));
+  const toggleSkip=i=>setSkipped(s=>{const n=new Set(s);n.has(i)?n.delete(i):n.add(i);return n;});
+  if(editIdx!==null&&prev[editIdx]) return(
+    <Modal title="Edit Card Before Saving" onClose={()=>setEditIdx(null)} wide>
+      <CardForm initial={{...prev[editIdx],tags:(prev[editIdx].tags||[]).join(", ")}} allCats={allCats} onSave={data=>{onUpdateCard(editIdx,data);setEditIdx(null);}} onCancel={()=>setEditIdx(null)}/>
+    </Modal>
+  );
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:0}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+        <p style={{fontSize:14,fontWeight:700,color:C.green}}>✓ {toSave.length} of {prev.length} cards ready</p>
+        <div style={{display:"flex",gap:8}}>
+          {onClose&&<Btn variant="secondary" size="sm" onClick={onClose}>← Back</Btn>}
+          <Btn variant="green" onClick={()=>onSaveAll(toSave)}>Save {toSave.length} Cards →</Btn>
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:7,maxHeight:"52dvh",overflowY:"auto"}}>
+        {prev.map((c,i)=>{
+          const dup=existingFronts.has(c.front.toLowerCase().trim());
+          const skip=skipped.has(i);const cc=catColor(c.category);
+          return(
+            <div key={i} style={{background:skip?C.bg:C.surface,borderRadius:13,border:`1px solid ${dup?C.amber+"66":C.border}`,padding:"10px 12px",opacity:skip?.5:1,transition:"opacity .15s"}}>
+              <div style={{display:"flex",alignItems:"flex-start",gap:9}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4,flexWrap:"wrap"}}>
+                    {c.article&&<ArticleBadge article={c.article}/>}
+                    <span style={{fontFamily:"'Nunito',sans-serif",fontSize:13,fontWeight:500,color:C.text}}>{c.front}</span>
+                    <Badge color={cc}>{c.category}</Badge>
+                    {dup&&<Badge color={C.amber} bg={C.amberBg}>possible duplicate</Badge>}
+                    {c.category==="Needs Review"&&<Badge color={C.gray} bg={C.grayBg}>needs review</Badge>}
+                  </div>
+                  <p style={{fontSize:11,color:C.muted}} dir="rtl">{c.hebrewTranslation||c.back}</p>
+                  {c.exampleGerman&&<p style={{fontSize:10,color:C.muted,fontStyle:"italic",marginTop:2}}>{c.exampleGerman}</p>}
+                  {(c.tags||[]).length>0&&<div style={{display:"flex",gap:3,marginTop:4,flexWrap:"wrap"}}>{c.tags.map(t=><span key={t} style={{fontSize:9,background:C.border,color:C.muted,padding:"1px 5px",borderRadius:7,fontWeight:600}}>#{t}</span>)}</div>}
+                </div>
+                <div style={{display:"flex",gap:4,flexShrink:0}}>
+                  <button onClick={()=>setEditIdx(i)} style={{width:27,height:27,border:`1px solid ${C.border}`,borderRadius:7,background:C.bg,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}} title="Edit">✏️</button>
+                  <button onClick={()=>toggleSkip(i)} style={{width:27,height:27,border:`1px solid ${skip?C.green+"66":C.border}`,borderRadius:7,background:skip?C.greenBg:C.redBg,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}} title={skip?"Include":"Skip"}>{skip?"↩":"✕"}</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{marginTop:12,display:"flex",justifyContent:"flex-end"}}>
+        <Btn variant="green" onClick={()=>onSaveAll(toSave)}>Save {toSave.length} Cards →</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   IMPORT VIEW — 3 tabs: Text | Image | CSV/JSON
+───────────────────────────────────────────────────────────── */
+const TEXT_EXAMPLE=`Category: Reflexive Verbs
+Front: sich ärgern über
+Hebrew: להתרגז על
+Back: to be annoyed about
+Example: Er ärgert sich über den Lärm.
+Example_He: הוא מתרגז על הרעש.
+Grammar: über + Akkusativ
+Präsens: ärgere mich
+Perfekt: habe mich geärgert
+Tags: reflexive, emotions
+
+Category: Vocabulary
+Article: die
+Front: Erfahrung
+Hebrew: ניסיון
+Example: Das war eine tolle Erfahrung.
+Grammar: die Erfahrung — Pl: Erfahrungen. Suf. -ung → die!
+Tags: vocab, noun`;
+
+function ImportView({cards:existing,allCats,onImport}){
+  const[tab,setTab]=useState("text");
+  const[preview,setPreview]=useState([]);
+  const[err,setErr]=useState("");
+  const[saved,setSaved]=useState(false);
+  // ── category / subcategory targeting ──
+  const[mainCat,setMainCat]=useState("");       // "" = auto-detect, "__new__" = typing new
+  const[newMainCat,setNewMainCat]=useState(""); // value when mainCat==="__new__"
+  const[subCat,setSubCat]=useState("");         // "" = none, "__new__" = typing new
+  const[newSubCat,setNewSubCat]=useState("");   // value when subCat==="__new__"
+  // text tab
+  const[rawText,setRawText]=useState("");
+  const[aiKey,setAiKey]=useState(()=>lsGet(LS.APIKEY,"")||"");
+  const[showKey,setShowKey]=useState(false);
+  const[aiLoading,setAiLoading]=useState(false);
+  // image tab
+  const[imageFile,setImageFile]=useState(null);
+  const[imageUrl,setImageUrl]=useState("");
+  const[ocrText,setOcrText]=useState("");
+  const[ocrLoading,setOcrLoading]=useState(false);
+  const[ocrProgress,setOcrProgress]=useState(0);
+  const[ocrDone,setOcrDone]=useState(false);
+  const[editOcr,setEditOcr]=useState(false);
+  // structured tab
+  const[structFmt,setStructFmt]=useState("csv");
+  const[structText,setStructText]=useState("");
+
+  const existingFronts=useMemo(()=>new Set(existing.map(c=>c.front.toLowerCase().trim())),[existing]);
+
+  // Resolved strings (never "__new__" raw)
+  const effectiveMain = mainCat==="__new__" ? newMainCat.trim() : mainCat;
+  const effectiveSub  = subCat==="__new__"  ? newSubCat.trim()  : subCat;
+
+  // Subcategory suggestions: subcategories already used in cards belonging to the chosen category
+  const subOptions = useMemo(()=>{
+    const scope = effectiveMain
+      ? existing.filter(c=>c.category===effectiveMain)
+      : existing;
+    const subs = scope.flatMap(c=>c.subCategory ? [c.subCategory] : []);
+    const tags = scope.flatMap(c=>c.tags||[]);
+    return Array.from(new Set([...subs,...tags])).sort();
+  },[existing, effectiveMain]);
+
+  const resetAll=()=>{setPreview([]);setErr("");setSaved(false);};
+
+  // Core: stamp every parsed card with the chosen category + subcategory, then set preview.
+  // - If effectiveMain is set → override category on all cards (creates it if new).
+  // - If effectiveSub  is set → store as card.subCategory and prepend to tags.
+  // Existing cards are NEVER touched; new cards are appended via onImport.
+  const finalize=(parsed)=>{
+    if(!parsed.length){setErr("No cards found. Check format and try again.");return;}
+    const stamped=parsed.map(c=>{
+      const next={...c, id:uid(), createdAt:TODAY()};
+      if(effectiveMain) next.category=effectiveMain;
+      if(effectiveSub){
+        next.subCategory=effectiveSub;
+        const tags=Array.isArray(next.tags)?[...next.tags]:(next.tags||"").split(",").map(t=>t.trim()).filter(Boolean);
+        if(!tags.includes(effectiveSub)) tags.unshift(effectiveSub);
+        next.tags=tags;
+      }
+      return next;
+    });
+    setPreview(stamped);
+    setErr("");setSaved(false);
+  };
+
+  // ── Tab: Text ──
+  const parseTextInput=()=>{resetAll();finalize(parseText(rawText));};
+  const runAI=async()=>{
+    if(!aiKey){setShowKey(true);return;}
+    setAiLoading(true);setErr("");
+    try{const r=await aiGenerateCards(rawText,aiKey);finalize(r);}
+    catch(e){setErr("AI error: "+e.message);}
+    setAiLoading(false);
+  };
+
+  // ── Tab: Image ──
+  const handleImageFile=e=>{
+    const f=e.target.files?.[0];if(!f)return;
+    setImageFile(f);setImageUrl(URL.createObjectURL(f));
+    setOcrText("");setOcrDone(false);setPreview([]);setErr("");
+  };
+  const runOCR=async()=>{
+    if(!imageFile)return;
+    setOcrLoading(true);setOcrProgress(0);setErr("");
+    try{const text=await ocrImage(imageFile,p=>setOcrProgress(p));setOcrText(text.trim());setOcrDone(true);}
+    catch(e){setErr("OCR error: "+e.message);}
+    setOcrLoading(false);
+  };
+  const parseOCRText=()=>{resetAll();finalize(parseText(ocrText));};
+  const runAIFromOCR=async()=>{
+    if(!aiKey){setShowKey(true);return;}
+    setAiLoading(true);setErr("");
+    try{const r=await aiGenerateCards(ocrText,aiKey);finalize(r);}
+    catch(e){setErr("AI error: "+e.message);}
+    setAiLoading(false);
+  };
+
+  // ── Tab: Structured ──
+  const parseStructured=()=>{
+    resetAll();
+    const r=structFmt==="json"?parseJSON(structText):parseCSV(structText);
+    finalize(r);
+  };
+
+  // saveAll appends to existing cards (root importCards does [...newCards,...existing])
+  const saveAll=(cards)=>{
+    onImport(cards);setSaved(true);
+    setPreview([]);setRawText("");setStructText("");
+    setOcrText("");setImageFile(null);setImageUrl("");setOcrDone(false);
+  };
+
+  const updatePreview=(i,data)=>setPreview(p=>p.map((c,j)=>j===i?{...c,...data}:c));
+
+  const inp={width:"100%",padding:"10px 13px",borderRadius:11,border:`1px solid ${C.border}`,fontSize:13,fontFamily:"'Nunito Sans',sans-serif",color:C.text,background:C.surface,outline:"none"};
+  const lbl={fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.7,marginBottom:4,display:"block"};
+
+  // ── Category selector (rendered once, above all tabs) ──
+  const catSelectorJSX=(
+    <div style={{background:"#fef5ec",border:`1.5px solid ${C.amberBdr}`,borderRadius:20,padding:"14px 16px",marginBottom:14}}>
+      <p style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:10}}>📂 Where to save these cards</p>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        {/* Main category */}
+        <div>
+          <label style={lbl}>Main Category</label>
+          <select value={mainCat} onChange={e=>{setMainCat(e.target.value);setSubCat("");setNewSubCat("");}}
+            style={{...inp,color:mainCat&&mainCat!=="__new__"?catColor(mainCat):C.text,fontWeight:mainCat&&mainCat!=="__new__"?700:400}}>
+            <option value="">— auto-detect —</option>
+            {CANONICAL_CATS.map(c=><option key={c} value={c}>{c}</option>)}
+            {allCats.filter(c=>!CANONICAL_CATS.includes(c)).map(c=><option key={c} value={c}>{c}</option>)}
+            <option value="__new__">+ New category…</option>
+          </select>
+          {mainCat==="__new__"&&(
+            <input value={newMainCat} onChange={e=>setNewMainCat(e.target.value)}
+              placeholder="Type category name…" style={{...inp,marginTop:6}}/>
+          )}
+        </div>
+        {/* Subcategory */}
+        <div>
+          <label style={lbl}>Subcategory <span style={{fontWeight:400,textTransform:"none"}}>(optional)</span></label>
+          <select value={subCat} onChange={e=>setSubCat(e.target.value)} style={inp}>
+            <option value="">— none —</option>
+            {subOptions.map(s=><option key={s} value={s}>{s}</option>)}
+            <option value="__new__">+ New subcategory…</option>
+          </select>
+          {subCat==="__new__"&&(
+            <input value={newSubCat} onChange={e=>setNewSubCat(e.target.value)}
+              placeholder="Type subcategory name…" style={{...inp,marginTop:6}}/>
+          )}
+        </div>
+      </div>
+      {/* Live summary */}
+      <div style={{marginTop:9,fontSize:11,display:"flex",gap:5,flexWrap:"wrap",alignItems:"center",color:C.muted}}>
+        <span>Cards will go into:</span>
+        {effectiveMain
+          ? <span style={{background:catColor(effectiveMain)+"22",color:catColor(effectiveMain),padding:"2px 9px",borderRadius:10,fontWeight:700}}>{effectiveMain}</span>
+          : <span style={{fontStyle:"italic"}}>category auto-detected per card</span>}
+        {effectiveSub&&<><span style={{color:C.amberBdr}}>›</span><span style={{background:C.border,color:C.muted,padding:"2px 8px",borderRadius:10,fontWeight:700}}>{effectiveSub}</span></>}
+        {effectiveMain&&<span style={{color:C.green,fontSize:10}}>✓ appends to existing</span>}
+      </div>
+    </div>
+  );
+
+  // If preview is ready, show preview table
+  if(preview.length>0)return(
+    <div style={{flex:1,overflowY:"auto",padding:"16px"}}>
+      <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:22,fontWeight:900,letterSpacing:"-.4px",color:C.text,marginBottom:14}}>Preview Generated Cards</h2>
+      <PreviewTable cards={preview} existingFronts={existingFronts} allCats={allCats} onSaveAll={saveAll} onUpdateCard={updatePreview} onClose={()=>setPreview([])}/>
+    </div>
+  );
+
+  return(
+    <div style={{flex:1,overflowY:"auto",padding:"16px"}}>
+      <div style={{marginBottom:16}}>
+        <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:900,letterSpacing:"-.5px",color:C.text,marginBottom:4}}>Import Material</h2>
+        <p style={{fontSize:13,color:C.muted,lineHeight:1.5}}>Turn your study material into flashcards automatically. Three ways to import:</p>
+      </div>
+
+      {/* Tab bar */}
+      <div style={{display:"flex",gap:0,marginBottom:14,borderRadius:20,overflow:"hidden",border:`1.5px solid ${C.border}`}}>
+        {[{k:"text",icon:"📝",label:"Paste Text"},{k:"image",icon:"📷",label:"Photo / Scan"},{k:"structured",icon:"📊",label:"CSV / JSON"}].map(t=>(
+          <button key={t.k} onClick={()=>{setTab(t.k);resetAll();}} style={{flex:1,padding:"11px 6px",border:"none",borderRight:t.k!=="structured"?`1px solid ${C.border}`:"none",background:tab===t.k?C.amberBg:C.surfaceAlt,color:tab===t.k?C.amber:C.muted,fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:"all .14s"}}>
+            <span style={{fontSize:16}}>{t.icon}</span>{t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Category / Subcategory selector — shared across all tabs */}
+      {catSelectorJSX}
+
+      {/* ── TAB: PASTE TEXT ── */}
+      {tab==="text"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {/* AI key config */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <p style={{fontSize:12,color:C.muted}}>Paste German study material — the app detects vocabulary, verbs, and grammar rules automatically.</p>
+            <button onClick={()=>setShowKey(v=>!v)} style={{fontSize:11,padding:"5px 10px",borderRadius:10,border:`1px solid ${aiKey?C.green:C.border}`,background:aiKey?C.greenBg:C.surface,color:aiKey?C.green:C.muted,cursor:"pointer",whiteSpace:"nowrap",fontWeight:700}}>🤖 AI {aiKey?"✓":"—"}</button>
+          </div>
+          {showKey&&(
+            <div style={{background:C.amberBg,border:`1px solid ${C.amberBdr}`,borderRadius:13,padding:"12px 14px"}}>
+              <p style={{fontSize:12,fontWeight:600,color:C.amber,marginBottom:6}}>🔑 Anthropic API Key</p>
+              <div style={{display:"flex",gap:8}}><input type="password" value={aiKey} onChange={e=>setAiKey(e.target.value)} placeholder="sk-ant-…" style={{...inp,flex:1}}/><Btn size="sm" onClick={()=>{lsSet(LS.APIKEY,aiKey);setShowKey(false);}}>Save</Btn></div>
+              <p style={{fontSize:11,color:C.muted,marginTop:6}}>API key stored locally. Used to call Claude for rich card generation from any text.</p>
+            </div>
+          )}
+          {/* Hint */}
+          <div style={{background:C.bg,borderRadius:11,padding:"9px 12px",fontSize:11,color:C.muted,lineHeight:1.7}}>
+            <b style={{color:C.text}}>Format:</b> Separate cards with blank lines. Use labels like <code style={{fontSize:10}}>Front:</code> <code style={{fontSize:10}}>Hebrew:</code> <code style={{fontSize:10}}>Grammar:</code> — or just paste free-form German text.
+          </div>
+          <textarea value={rawText} onChange={e=>setRawText(e.target.value)} placeholder={TEXT_EXAMPLE} style={{...inp,minHeight:200,resize:"vertical",fontFamily:"monospace",fontSize:12}}/>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <Btn onClick={parseTextInput} disabled={!rawText.trim()}>🔍 Parse Text → Preview</Btn>
+            {aiKey?<Btn variant="secondary" onClick={runAI} disabled={!rawText.trim()||aiLoading}>{aiLoading?<><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⏳</span> Generating…</>:"🤖 AI Generate"}</Btn>:<Btn variant="ghost" size="sm" onClick={()=>setShowKey(true)}>Configure AI →</Btn>}
+          </div>
+        </div>
+      )}
+
+      {/* ── TAB: IMAGE / SCAN ── */}
+      {tab==="image"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <p style={{fontSize:12,color:C.muted,lineHeight:1.5}}>Upload a photo or screenshot of your study material. The app will extract the text using OCR, then you can review and edit it before generating flashcards.</p>
+
+          {/* Drop zone */}
+          {!imageFile?(
+            <label style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,padding:"32px 20px",borderRadius:16,border:`2px dashed ${C.border}`,background:C.surfaceAlt,cursor:"pointer",borderRadius:22,transition:"border .15s"}} onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor=C.amber;}} onDragLeave={e=>e.currentTarget.style.borderColor=C.border} onDrop={e=>{e.preventDefault();const f=e.dataTransfer.files?.[0];if(f&&f.type.startsWith("image/")){setImageFile(f);setImageUrl(URL.createObjectURL(f));}}}>
+              <span style={{fontSize:40}}>📷</span>
+              <p style={{fontSize:14,fontWeight:600,color:C.text,fontFamily:"'Nunito',sans-serif"}}>Drop image or click to upload</p>
+              <p style={{fontSize:12,color:C.muted}}>Supports JPG, PNG, WEBP — photo of notes, textbook, screenshot</p>
+              <input type="file" accept="image/*" onChange={handleImageFile} style={{display:"none"}}/>
+            </label>
+          ):(
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {/* Preview + remove */}
+              <div style={{position:"relative",borderRadius:20,overflow:"hidden",border:`1.5px solid ${C.border}`,maxHeight:220}}>
+                <img src={imageUrl} alt="preview" style={{width:"100%",objectFit:"contain",display:"block"}}/>
+                <button onClick={()=>{setImageFile(null);setImageUrl("");setOcrText("");setOcrDone(false);setPreview([]);}} style={{position:"absolute",top:8,right:8,background:"rgba(0,0,0,.55)",color:"#fff",border:"none",borderRadius:8,padding:"4px 10px",fontSize:12,fontWeight:700,cursor:"pointer"}}>✕ Remove</button>
+              </div>
+
+              {/* OCR step */}
+              {!ocrDone?(
+                <div>
+                  {ocrLoading?(
+                    <div style={{background:C.blueBg,border:`1px solid ${C.blue}33`,borderRadius:13,padding:"14px 16px",textAlign:"center"}}>
+                      <div style={{fontSize:13,fontWeight:600,color:C.blue,marginBottom:8}}>Extracting text from image…</div>
+                      <div style={{height:8,background:C.border,borderRadius:4,overflow:"hidden",marginBottom:6}}>
+                        <div style={{height:8,background:C.blue,borderRadius:4,width:`${ocrProgress}%`,transition:"width .3s"}}/>
+                      </div>
+                      <div style={{fontSize:12,color:C.muted}}>{ocrProgress}% — please wait</div>
+                    </div>
+                  ):(
+                    <Btn onClick={runOCR} style={{width:"100%",justifyContent:"center"}}>🔍 Extract Text (OCR)</Btn>
+                  )}
+                </div>
+              ):(
+                <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <p style={{fontSize:13,fontWeight:600,color:C.green}}>✓ Text extracted successfully</p>
+                    <button onClick={()=>setEditOcr(v=>!v)} style={{fontSize:12,padding:"5px 10px",borderRadius:9,border:`1px solid ${C.border}`,background:editOcr?C.amberBg:C.surface,color:editOcr?C.amber:C.muted,cursor:"pointer",fontWeight:600}}>{editOcr?"Done editing":"✏️ Edit text"}</button>
+                  </div>
+                  {editOcr?(
+                    <textarea value={ocrText} onChange={e=>setOcrText(e.target.value)} style={{...inp,minHeight:160,resize:"vertical",fontFamily:"monospace",fontSize:12}}/>
+                  ):(
+                    <div style={{background:C.bg,borderRadius:11,padding:"10px 13px",fontSize:12,color:C.text,whiteSpace:"pre-wrap",lineHeight:1.7,maxHeight:160,overflowY:"auto",fontFamily:"monospace"}}>{ocrText||"(no text detected)"}</div>
+                  )}
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <Btn onClick={parseOCRText} disabled={!ocrText.trim()}>🔍 Parse → Preview</Btn>
+                    {aiKey?<Btn variant="secondary" onClick={runAIFromOCR} disabled={!ocrText.trim()||aiLoading}>{aiLoading?<><span style={{animation:"spin 1s linear infinite",display:"inline-block"}}>⏳</span> Generating…</>:"🤖 AI Generate"}</Btn>:<Btn variant="ghost" size="sm" onClick={()=>{setTab("text");setShowKey(true);}}>Configure AI →</Btn>}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{background:"#fef5ec",border:`1px solid ${C.amberBdr}`,borderRadius:16,padding:"10px 13px",fontSize:11,color:C.muted,lineHeight:1.6}}>
+            <b style={{color:C.amber}}>💡 Best results:</b> Use clear, well-lit photos with readable text. Works with handwritten notes, printed textbooks, and screenshots of study materials. German, Hebrew, and English text are all supported.
+          </div>
+        </div>
+      )}
+
+      {/* ── TAB: CSV / JSON ── */}
+      {tab==="structured"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <p style={{fontSize:12,color:C.muted}}>Import structured flashcard data from a spreadsheet export or JSON file.</p>
+          {/* Format selector */}
+          <div style={{display:"flex",gap:6}}>
+            {["csv","json"].map(f=><button key={f} onClick={()=>setStructFmt(f)} style={{flex:1,padding:"8px",borderRadius:10,border:`2px solid ${structFmt===f?C.amber:C.border}`,background:structFmt===f?C.amberBg:C.surface,color:structFmt===f?C.amber:C.muted,fontSize:13,fontWeight:700,cursor:"pointer"}}>{f.toUpperCase()}</button>)}
+          </div>
+          {/* File upload */}
+          <label style={{display:"flex",alignItems:"center",gap:8,padding:"9px 13px",borderRadius:11,border:`1px dashed ${C.border}`,background:C.bg,cursor:"pointer",fontSize:12,color:C.muted}}>
+            <span style={{fontSize:16}}>📁</span> Upload {structFmt.toUpperCase()} file (optional)
+            <input type="file" accept={structFmt==="csv"?".csv,text/csv":".json,application/json"} onChange={e=>{const f=e.target.files?.[0];if(f){const r=new FileReader();r.onload=ev=>setStructText(ev.target.result);r.readAsText(f);}}} style={{display:"none"}}/>
+          </label>
+          {/* Format hint */}
+          <div style={{background:C.bg,borderRadius:11,padding:"9px 12px",fontSize:11,color:C.muted,lineHeight:1.7}}>
+            {structFmt==="csv"?<><b style={{color:C.text}}>CSV columns:</b> category, article, front, back, hebrew, exampleGerman, exampleHebrew, grammar, prep, case, prasens, perfekt, prateritum, tags (;-sep), difficulty, notes</>:<><b style={{color:C.text}}>JSON array:</b> <code style={{fontSize:10}}>[{"{"}category, article, front, back, hebrewTranslation, exampleGerman, grammarNote, tags, ...{"}"}]</code></>}
+          </div>
+          <textarea value={structText} onChange={e=>setStructText(e.target.value)} placeholder={structFmt==="csv"?"Vocabulary,die,Erfahrung,experience,ניסיון,Das war schön.,זה היה יפה.,Pl: Erfahrungen,für,Akkusativ,,,,,vocab,1,\n":"[{\"category\":\"Vocabulary\",\"article\":\"die\",\"front\":\"Erfahrung\",\"hebrewTranslation\":\"ניסיון\"}]"} style={{...inp,minHeight:150,resize:"vertical",fontFamily:"monospace",fontSize:12}}/>
+          <Btn onClick={parseStructured} disabled={!structText.trim()}>Parse → Preview</Btn>
+        </div>
+      )}
+
+      {/* Error */}
+      {err&&<div style={{background:C.redBg,border:`1px solid ${C.red}44`,borderRadius:11,padding:"10px 13px",marginTop:12,fontSize:13,color:C.red}}>{err}</div>}
+
+      {/* Saved */}
+      {saved&&<div style={{background:C.greenBg,border:`1px solid ${C.green}44`,borderRadius:11,padding:"10px 13px",marginTop:12,fontSize:13,color:C.green,animation:"revealUp .3s ease"}}>✓ Cards saved to your library!</div>}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   DASHBOARD
+───────────────────────────────────────────────────────────── */
+function Ring({pct,color,size=62,stroke=5.5,label,sub}){
+  const r=(size-stroke)/2,ci=2*Math.PI*r,da=ci*(Math.min(pct,100)/100);
+  return(
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+      <div style={{position:"relative",width:size,height:size}}>
+        <svg width={size} height={size} style={{transform:"rotate(-90deg)"}}>
+          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={C.border} strokeWidth={stroke}/>
+          <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeDasharray={`${da} ${ci}`} strokeLinecap="round" style={{transition:"stroke-dasharray .6s"}}/>
+        </svg>
+        <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Nunito',sans-serif",fontSize:13,fontWeight:500,color:C.text}}>{label}</div>
+      </div>
+      <p style={{fontSize:10,color:C.muted,textAlign:"center"}}>{sub}</p>
+    </div>
+  );
+}
+function DashView({cards,stats,streak}){
+  const t=cards.length;
+  const known=cards.filter(c=>stats[c.id]?.status==="known").length;
+  const unk=cards.filter(c=>!stats[c.id]||stats[c.id].status==="unknown").length;
+  const diff=cards.filter(c=>stats[c.id]?.status==="difficult").length;
+  const nw=cards.filter(c=>!stats[c.id]||!stats[c.id].reviewCount).length;
+  const tod=Object.values(stats).filter(s=>s.lastReviewed===TODAY()).length;
+  const due=cards.filter(c=>isDue(stats[c.id])).length;
+  const needsRev=cards.filter(c=>c.category==="Needs Review").length;
+  const pct=Math.round((known/Math.max(t,1))*100);
+  const arts={der:0,die:0,das:0};cards.forEach(c=>{if(arts[c.article]!==undefined)arts[c.article]++;});
+  const cats=useMemo(()=>{const m={};cards.forEach(c=>{if(!m[c.category])m[c.category]={t:0,k:0};m[c.category].t++;if(stats[c.id]?.status==="known")m[c.category].k++;});return Object.entries(m).sort((a,b)=>b[1].t-a[1].t);},[cards,stats]);
+  return(
+    <div style={{flex:1,overflowY:"auto",padding:"16px"}}>
+      <h2 style={{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:900,letterSpacing:"-.5px",color:C.text,marginBottom:14}}>Dashboard</h2>
+      <div style={{background:streak.count>0?"#fef3e8":C.surfaceAlt,border:`1.5px solid ${streak.count>0?C.amberBdr:C.border}`,borderRadius:22,padding:"13px 16px",display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+        <span style={{fontSize:26}}>{streak.count>0?"🔥":"❄️"}</span>
+        <div><p style={{fontFamily:"'Playfair Display',serif",fontSize:19,fontWeight:700,letterSpacing:"-.3px",color:C.text}}>{streak.count} day streak</p><p style={{fontSize:12,color:C.muted}}>{streak.count>0?"Keep it up! Study daily.":"Study today to start a streak."}</p></div>
+        <div style={{marginLeft:"auto",textAlign:"right"}}><p style={{fontFamily:"'Playfair Display',serif",fontSize:24,fontWeight:900,color:C.amber}}>{tod}</p><p style={{fontSize:10,color:C.muted}}>today</p></div>
+      </div>
+      <div style={{background:C.surfaceAlt,borderRadius:22,border:`1.5px solid ${C.border}`,padding:"16px",marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-around",alignItems:"center"}}>
+          <Ring pct={pct} color={C.green} label={`${pct}%`} sub="Known"/>
+          <Ring pct={Math.round(diff/Math.max(t,1)*100)} color={C.amber} label={diff} sub="Difficult"/>
+          <Ring pct={Math.round(tod/Math.max(t,1)*100)} color={C.blue} label={tod} sub="Today"/>
+          <Ring pct={Math.round((1-nw/Math.max(t,1))*100)} color={C.violet} label={t-nw} sub="Seen"/>
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:10}}>
+        {[{l:"Total cards",v:t,c:C.muted},{l:"Known ✓",v:known,c:C.green},{l:"Unknown",v:unk,c:C.red},{l:"Due for review",v:due,c:C.blue},{l:"Difficult ★",v:diff,c:C.amber},{l:"Needs Review",v:needsRev,c:C.gray}].map(({l,v,c})=>(
+          <div key={l} style={{background:C.surfaceAlt,border:`1.5px solid ${C.border}`,borderRadius:18,padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontSize:11,color:C.muted}}>{l}</span>
+            <span style={{fontSize:15,fontWeight:600,color:c,fontFamily:"'Nunito',sans-serif"}}>{v}</span>
+          </div>
+        ))}
+      </div>
+      {(arts.der+arts.die+arts.das)>0&&(
+        <div style={{background:C.surfaceAlt,border:`1.5px solid ${C.border}`,borderRadius:22,padding:"14px",marginBottom:10}}>
+          <p style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.7,marginBottom:9}}>Vocabulary Articles</p>
+          <div style={{display:"flex",gap:9}}>
+            {[{a:"der",c:ARTICLE_META.der.color,bg:ARTICLE_META.der.bg},{a:"die",c:ARTICLE_META.die.color,bg:ARTICLE_META.die.bg},{a:"das",c:ARTICLE_META.das.color,bg:ARTICLE_META.das.bg}].map(({a,c,bg})=>(
+              <div key={a} style={{flex:1,background:bg,borderRadius:12,padding:"9px 6px",textAlign:"center"}}><p style={{fontFamily:"'Nunito',sans-serif",fontSize:15,fontWeight:600,color:c}}>{a}</p><p style={{fontSize:13,color:C.muted,marginTop:2,fontWeight:600}}>{arts[a]}</p></div>
+            ))}
+          </div>
+        </div>
+      )}
+      {cats.length>0&&(
+        <div style={{background:C.surfaceAlt,border:`1.5px solid ${C.border}`,borderRadius:22,padding:"14px"}}>
+          <p style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.7,marginBottom:10}}>By Category</p>
+          <div style={{display:"flex",flexDirection:"column",gap:7}}>
+            {cats.slice(0,12).map(([cat,{t:ct,k:ck}])=>{const p=Math.round((ck/Math.max(ct,1))*100);const cc=catColor(cat);return(
+              <div key={cat}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontFamily:"'Playfair Display',serif",fontSize:13,color:C.text,fontWeight:700}}>{cat}</span><span style={{fontSize:11,color:C.muted}}>{ck}/{ct} · {p}%</span></div>
+                <div style={{height:4,background:C.border,borderRadius:4,overflow:"hidden"}}><div style={{height:4,background:cc,borderRadius:4,width:`${p}%`,transition:"width .5s"}}/></div>
+              </div>
+            );})}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ROOT APP
+───────────────────────────────────────────────────────────── */
+const NAV=[{k:"study",icon:"🃏",label:"Study"},{k:"library",icon:"📚",label:"Library"},{k:"import",icon:"✨",label:"Import"},{k:"dash",icon:"📊",label:"Stats"}];
+
+export default function App(){
+  const[cards,setCards]=useState(initCards);
+  const[stats,setStats]=useState(()=>lsGet(LS.STATS,{}));
+  const[streak,setStreak]=useState(()=>lsGet(LS.STREAK,{count:0,lastDate:""}));
+  const[view,setView]=useState("study");
+
+  useEffect(()=>{if(window.speechSynthesis){window.speechSynthesis.getVoices();window.speechSynthesis.onvoiceschanged=()=>window.speechSynthesis.getVoices();}},[]);
+  useEffect(()=>lsSet(LS.CARDS,cards),[cards]);
+  useEffect(()=>lsSet(LS.STATS,stats),[stats]);
+
+  const allCats=useMemo(()=>Array.from(new Set(cards.map(c=>c.category))).sort(),[cards]);
+
+  const touchStreak=useCallback(()=>{
+    setStreak(prev=>{
+      const y=new Date();y.setDate(y.getDate()-1);const ys=y.toISOString().slice(0,10);const td=TODAY();
+      if(prev.lastDate===td)return prev;
+      const count=prev.lastDate===ys?prev.count+1:1;
+      const next={count,lastDate:td};lsSet(LS.STREAK,next);return next;
+    });
+  },[]);
+
+  const handleSwipe=useCallback((dir,card)=>{
+    const knew=dir==="right";
+    setStats(prev=>{
+      const old=prev[card.id]||{reviewCount:0,knownCount:0};
+      const kn=knew?(old.knownCount||0)+1:0;
+      const next={...prev,[card.id]:{reviewCount:(old.reviewCount||0)+1,knownCount:kn,status:knew?"known":"unknown",lastReviewed:TODAY(),nextReview:nextReviewDate({...old,knownCount:kn},knew)}};
+      lsSet(LS.STATS,next);return next;
+    });
+    touchStreak();
+  },[touchStreak]);
+
+  const addCard=useCallback(data=>setCards(c=>[{...data,id:uid(),createdAt:TODAY()},...c]),[]);
+  const updateCard=useCallback(data=>setCards(c=>c.map(x=>x.id===data.id?data:x)),[]);
+  const deleteCard=useCallback(id=>setCards(c=>c.filter(x=>x.id!==id)),[]);
+  const dupCard=useCallback(c=>setCards(arr=>[{...c,id:uid(),front:c.front+" (copy)",createdAt:TODAY()},...arr]),[]);
+  const importCards=useCallback(arr=>setCards(c=>[...arr,...c]),[]);
+  // Delete all cards in a category
+  const deleteCategory=useCallback(cat=>setCards(c=>c.filter(x=>x.category!==cat)),[]);
+  // Remove subcategory label from all cards in a category (cards stay, label removed)
+  const deleteSubcategory=useCallback((sub,cat)=>setCards(c=>c.map(x=>{
+    if(x.category!==cat||x.subCategory!==sub)return x;
+    const tags=(x.tags||[]).filter(t=>t!==sub);
+    return{...x,subCategory:"",tags};
+  })),[]);
+
+  const knownToday=useMemo(()=>Object.values(stats).filter(s=>s.lastReviewed===TODAY()&&s.status==="known").length,[stats]);
+
+  return(
+    <>
+      <style>{G}</style>
+      <div style={{height:"100dvh",display:"flex",flexDirection:"column",background:C.bg,maxWidth:480,margin:"0 auto",boxShadow:"0 0 60px rgba(0,0,0,.08)",position:"relative"}}>
+        {/* Header */}
+        <header style={{background:C.surfaceAlt,borderBottom:`1px solid ${C.border}`,padding:"11px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+          <div>
+            <h1 style={{fontFamily:"'Nunito',sans-serif",fontSize:19,fontWeight:500,color:C.text,lineHeight:1}}>🇩🇪 Deutsch Lernen</h1>
+            <p style={{fontSize:10,color:C.muted,marginTop:2}}>{streak.count>0?`🔥 ${streak.count} day streak · `:""}{ knownToday>0?`✓ ${knownToday} known today`:"Study to build your streak"}</p>
+          </div>
+          <span style={{fontSize:11,background:C.amberBg,color:C.amber,padding:"4px 12px",borderRadius:99,fontWeight:700,border:`1.5px solid ${C.amberBdr}`}}>{cards.length} cards</span>
+        </header>
+
+        {/* Views */}
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",position:"relative"}}>
+          {view==="study"  &&<StudyView cards={cards} stats={stats} onSwipe={handleSwipe}/>}
+          {view==="library"&&<LibraryView cards={cards} stats={stats} onAdd={addCard} onUpdate={updateCard} onDelete={deleteCard} onDuplicate={dupCard} onDeleteCategory={deleteCategory} onDeleteSubcategory={deleteSubcategory}/>}
+          {view==="import" &&<ImportView cards={cards} allCats={allCats} onImport={importCards}/>}
+          {view==="dash"   &&<DashView cards={cards} stats={stats} streak={streak}/>}
+        </div>
+
+        {/* Nav */}
+        <nav style={{background:C.surfaceAlt,borderTop:`1px solid ${C.border}`,display:"flex",flexShrink:0,paddingBottom:"env(safe-area-inset-bottom)"}}>
+          {NAV.map(n=>(
+            <button key={n.k} onClick={()=>setView(n.k)} style={{flex:1,padding:"10px 4px 9px",border:"none",background:"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3,color:view===n.k?C.amber:C.muted,borderTop:`2.5px solid ${view===n.k?C.amber:"transparent"}`,transition:"all .15s",fontFamily:"'Nunito Sans',sans-serif"}}>
+              <span style={{fontSize:19}}>{n.icon}</span>
+              <span style={{fontSize:10,fontWeight:700,letterSpacing:.3,textTransform:"uppercase"}}>{n.label}</span>
+            </button>
+          ))}
+        </nav>
+      </div>
+    </>
+  );
+}
